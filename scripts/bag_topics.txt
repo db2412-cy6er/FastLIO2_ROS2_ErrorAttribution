@@ -10,7 +10,6 @@
 # 仿真真值 (P3D 插件 + ground_truth_bridge)
 /gt_odom
 /gt_path
-/gazebo/model_states
 
 # 2D 切片与导航
 /scan
