@@ -15,7 +15,9 @@ GlobalRelocalization::GlobalRelocalization() : Node("global_relocalization")
   registered_leaf_size_ = 0.25;
   num_threads_ = 4;
   num_neighbors_ = 20;
-  prior_pcd_file_ = "/home/pio/Nav2_3D_ws/src/me_nav2_bringup/pcd/nav_test_4_27.pcd";
+  // 先验 PCD 地图路径由 launch 参数 `prior_pcd_file` 注入，
+  // 例如可以在 launch 中传入 /home/db2412/Lidar_nav2_ws/src/me_nav2_bringup/pcd/nav_test_4_27.pcd
+  prior_pcd_file_ = this->declare_parameter<std::string>("prior_pcd_file", "");
   
   // 初始化位姿
   // [x, y, z, roll, pitch, yaw] - init_pose parameters
@@ -38,7 +40,12 @@ GlobalRelocalization::GlobalRelocalization() : Node("global_relocalization")
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
 
   // 加载地图并对齐的机器的 odom 下
-  loadGlobalMap(prior_pcd_file_);
+  if (prior_pcd_file_.empty()) {
+    RCLCPP_ERROR(this->get_logger(),
+      "prior_pcd_file 为空，无法加载先验地图，请在 launch 中通过参数指定!");
+  } else {
+    loadGlobalMap(prior_pcd_file_);
+  }
 
   // pcd点云降采样，转为 0.25*0.25*0.25 体素盒子，
   // 然后每个体素盒子对应一个协方差矩阵(用于还原体素盒子内部点云原本的样子)

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ground_truth_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    仿真 Ground Truth 桥接模块：将 Gazebo P3D 真值里程计 (/gt_odom) 聚合为
+    nav_msgs/Path (/gt_path) 供 RViz 可视化与离线评测，并可选地导出 TUM 格式轨迹
+    日志供 evo 进行 ATE/RPE 误差分析。同时提供健康监测，保障评测数据的完整性。
+  </description>
+  <maintainer email="liyuminglyx@163.com">pio</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

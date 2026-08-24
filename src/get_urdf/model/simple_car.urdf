@@ -158,6 +158,20 @@
     </plugin>
   </gazebo>
 
+  <!-- ===== 真值里程计插件 (gazebo_ros_p3d) =====
+       发布 /gt_odom (nav_msgs/Odometry)，机器人在 world/map 系下的真实位姿。
+       用途：作为 FAST-LIO / Point-LIO / LIO-SAM 等里程计的仿真 Ground Truth，
+       配合 ground_truth_bridge 节点与 evo 工具完成定量评测与误差归因。 -->
+  <gazebo>
+    <plugin name="gazebo_ros_p3d_ground_truth" filename="libgazebo_ros_p3d.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>odom:=gt_odom</remapping>
+      </ros>
+      <body_name>base_footprint</body_name>
+      <update_rate>100</update_rate>
+    </plugin>
+  </gazebo>
 
 <!-- Mid-360 雷达传感器 -->
   <link name="livox_frame">

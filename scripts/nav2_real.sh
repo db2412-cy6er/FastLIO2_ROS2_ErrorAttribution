@@ -14,7 +14,7 @@ cd "$WORKSPACE_ROOT" || exit 1
 # gnome-terminal --title="Point-LIO 里程计" -- bash -c "
 # source install/setup.bash;
 # ros2 launch point_lio point_lio.launch.py \
-#   point_lio_cfg_dir:=/home/pio/Nav2_3D_ws/src/localization/point_lio/config/mid360_real.yaml"
+#   point_lio_cfg_dir:=$WORKSPACE_ROOT/src/localization/point_lio/config/mid360_real.yaml"
 
 # gnome-terminal --title="Point-LIO lio_interface" -- bash -c "
 # source install/setup.bash;

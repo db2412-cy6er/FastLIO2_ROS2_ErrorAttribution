@@ -1,0 +1,21 @@
+# ros2 bag record 话题列表
+# 传感器原始数据
+/livox/lidar
+/livox/imu
+
+# 里程计输出
+/odom
+/registered_scan
+
+# 仿真真值 (P3D 插件 + ground_truth_bridge)
+/gt_odom
+/gt_path
+/gazebo/model_states
+
+# 2D 切片与导航
+/scan
+/cmd_vel
+
+# 坐标变换
+/tf
+/tf_static

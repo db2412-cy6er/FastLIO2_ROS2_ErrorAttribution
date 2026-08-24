@@ -2,6 +2,7 @@
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(dirname -- "$SCRIPT_DIR")"
+export WORKSPACE_ROOT
 cd "$WORKSPACE_ROOT" || exit 1
 
 # 实机建图启动脚本
@@ -14,7 +15,7 @@ cd "$WORKSPACE_ROOT" || exit 1
 # gnome-terminal --title="Point-LIO 里程计" -- bash -c "
 # source install/setup.bash;
 # ros2 launch point_lio point_lio.launch.py \
-#   point_lio_cfg_dir:=/home/pio/Nav2_3D_ws/src/localization/point_lio/config/mid360_real.yaml"
+#   point_lio_cfg_dir:=$WORKSPACE_ROOT/src/localization/point_lio/config/mid360_real.yaml"
 
 # gnome-terminal --title="Point-LIO lio_interface" -- bash -c "
 # source install/setup.bash;
@@ -57,4 +58,4 @@ ros2 launch me_nav2_bringup pointcloud_to_laserscan_launch.py"
 gnome-terminal --title="slam_toolbox 建图" -- bash -c "
 source install/setup.bash;
 ros2 launch slam_toolbox online_async_launch.py \
-    slam_params_file:=/home/pio/Nav2_3D_ws/src/me_nav2_bringup/config/slam_toolbox_params.yaml"
+    slam_params_file:=$WORKSPACE_ROOT/src/me_nav2_bringup/config/slam_toolbox_params.yaml"

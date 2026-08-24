@@ -162,9 +162,33 @@ ros2 topic hz /registered_scan
 
 日志中出现 `KISSMatcher initialization succeeded` 表示全局初始化成功，随后会进入 small_gicp 连续跟踪阶段。若持续出现 `KISSMatcher initialization failed`，通常是当前累计点云与先验地图重叠不足、点云太稀疏，或 `prior_pcd_file` / 坐标系设置不匹配。
 
+### 3.6 多场景切换与真值评测
+
+本项目内置多套仿真场景，启动脚本与 launch 均支持一键切换：
+
+| 场景 | world 参数 | 2D 地图 map | 先验 PCD pcd |
+|------|-----------|-----------|-------------|
+| test_world（默认测试场，16 模型） | `test_world` | `nav_test_4_27` | `nav_test_4_27` |
+| normal_indoor（室内住宅，89 模型） | `normal_indoor` | 先用 `mapping_sim.sh` 建图生成 | 建图后保存 PCD |
+
+```bash
+cd scripts
+./nav2_sim.sh                              # 默认场景
+./nav2_sim.sh normal_indoor                # 切换世界（其余沿用默认）
+./nav2_sim.sh normal_indoor normal_indoor normal_indoor   # 全部指定
+./mapping_sim.sh normal_indoor             # 在新场景中建图
+./record_bag.sh                            # 录制评测数据包（含真值 /gt_odom）
+```
+
+仿真机器人 URDF 内置 **P3D 真值里程计插件**，发布 `/gt_odom`（机器人
+在 world/map 系下的真实位姿，100 Hz）；`ground_truth_bridge` 节点将其聚合为
+`/gt_path` 并可选导出 TUM 轨迹日志，配合 [evo](https://github.com/MichaelGrupp/evo)
+即可完成 LIO 里程计 ATE/RPE 定量评测与**误差归因闭环**（实验模板见
+`docs/experiments/`）。
+
 ## 4. 功能包
 
-工作空间包含 **19 个 ROS 2 功能包**，位于 `src/` 下：
+工作空间包含 **20 个 ROS 2 功能包**，位于 `src/` 下：
 
 **里程计与定位** (`src/localization/`)
 
@@ -195,6 +219,10 @@ ros2 topic hz /registered_scan
 - `get_urdf` — 四轮滑移转向机器人 URDF、Gazebo 世界、RViz 配置
 - `gld_robot_description` — 实机 URDF（含 RealSense D456/D405、Orbbec Gemini 相机）
 - `livox_laser_simulation_RO2` — Livox LiDAR Gazebo 仿真插件
+
+**仿真评测与真值** (`src/ground_truth_bridge/`)
+
+- `ground_truth_bridge` — 真值桥接：将 Gazebo P3D 真值 `/gt_odom` 聚合为 `/gt_path`，可选导出 TUM 轨迹日志，内置数据健康监测，供 evo 定量评测
 
 **工具**
 
@@ -274,10 +302,11 @@ ros2 topic hz /registered_scan
 | `lidar_frame` | livox_frame | LiDAR 坐标系，本项目通常为 `livox_frame` |
 | `init_pose` | `[0,0,0,0,0,0]` | 可选初始位姿 `[x,y,z,roll,pitch,yaw]` |
 
-当前 launch 文件给出的工作空间默认值为：
+当前 launch 文件给出的工作空间默认值为（`prior_pcd_file` 支持传绝对路径或
+`me_nav2_bringup/pcd/` 下的文件名，由 ament_index 自动解析，不再依赖机器路径）：
 
 ```text
-prior_pcd_file: /home/pio/Nav2_3D_ws/src/me_nav2_bringup/pcd/nav_test_4_27.pcd
+prior_pcd_file: <install>/../me_nav2_bringup/pcd/nav_test_4_27.pcd  (自动解析)
 input_cloud_topic: /registered_scan
 map_frame: map
 odom_frame: odom
@@ -297,6 +326,8 @@ lidar_frame: livox_frame
 | `/cloud_registered` | PointCloud2 | FAST-LIO / Point-LIO |
 | `/registered_scan` | PointCloud2 | sensor_scan_generation |
 | `/odom` | Odometry | sensor_scan_generation |
+| `/gt_odom` | Odometry | Gazebo P3D 真值插件（仿真） |
+| `/gt_path` | Path | ground_truth_bridge（仿真） |
 | `/scan` | LaserScan | pointcloud_to_laserscan |
 | `/cmd_vel` | Twist | Nav2 |
 | `/initialpose` | PoseWithCovarianceStamped | RViz |

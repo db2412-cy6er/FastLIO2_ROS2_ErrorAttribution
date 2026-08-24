@@ -1,22 +1,26 @@
-# Copyright 2025 Lihan Chen
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
+def _resolve_pcd_file(pcd: str) -> str:
+    if os.path.isabs(pcd):
+        return pcd
+    if not pcd.endswith('.pcd'):
+        pcd = pcd + '.pcd'
+    return os.path.join(get_package_share_directory('me_nav2_bringup'), 'pcd', pcd)
+
+
+def _default_pcd_file() -> str:
+    return os.path.join(
+        get_package_share_directory('me_nav2_bringup'), 'pcd', 'nav_test_4_27.pcd')
+
+
+def _launch_node(context, *args, **kwargs):
     # Map fully qualified names to relative ones so the node's namespace can be prepended.
     # In case of the transforms (tf), currently, there doesn't seem to be a better alternative
     # https://github.com/ros/geometry2/issues/32
@@ -24,6 +28,11 @@ def generate_launch_description():
     # TODO(orduno) Substitute with `PushNodeRemapping`
     #              https://github.com/ros2/launch_ros/issues/56
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+
+    use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() in \
+        ('true', '1', 'yes')
+    prior_pcd_file = _resolve_pcd_file(
+        LaunchConfiguration('prior_pcd_file').perform(context))
 
     node = Node(
         package="small_gicp_relocalization",
@@ -44,10 +53,23 @@ def generate_launch_description():
                 "base_frame": "base_footprint",
                 "lidar_frame": "livox_frame",
                 "robot_base_frame": "base_footprint",
-                "prior_pcd_file": "/home/pio/Nav2_3D_ws/src/me_nav2_bringup/pcd/nav_test_4_27.pcd",
+                "prior_pcd_file": prior_pcd_file,
                 "input_cloud_topic": "/registered_scan",
+                "use_sim_time": use_sim_time,
             }
         ],
     )
+    return [node]
 
-    return LaunchDescription([node])
+
+def generate_launch_description():
+    """small_gicp 局部重定位（支持多场景先验 PCD 切换）。"""
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'prior_pcd_file', default_value=_default_pcd_file(),
+            description='先验 PCD 地图: 绝对路径，或 me_nav2_bringup/pcd/ 下的文件名(可省略 .pcd)'),
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='false',
+            description='是否使用仿真时钟 (仿真建议 true)'),
+        OpaqueFunction(function=_launch_node),
+    ])

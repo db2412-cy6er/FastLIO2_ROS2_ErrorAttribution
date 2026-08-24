@@ -13,6 +13,15 @@ __pycache__/
 *.weights
 *.engine
 
+# 评测/录包数据
+data/
+*.bag
+/test.pcd
+
+# TF 树调试输出
+frames_*.gv
+frames_*.pdf
+
 .claude/
 .codex
 CLAUDE.md
