@@ -1,0 +1,18 @@
+# P3 D2: stress fault injection 示例 (评审 R28 —— 在保留 P2 frozen holdout 基础上新增)
+# 运行时副本: data/fault_configs/corridor_stress_faults.yaml
+# 用途: 在 corridor_run2 上注入更强、更持续的 matching degradation,
+#   专门验证 adaptive matching channel (aggressive down-weighting) 是否真正有效。
+# 与 P2 holdout (fault_configs_holdout_example.yaml, seed=7) 的关系:
+#   - 不替换 holdout (跨阶段连续性由 holdout 保证);
+#   - 本文件是独立的更强 stress 配置, 固定 seed/时间窗/强度 (seed=99)。
+# 设计: 更长 fault 窗口 (持续多帧, 覆盖 one-frame delay 的"无提前保护"局限)、
+#   更强 dropout (0.95)、更窄 fov_crop、更大 outlier (0.20)、更强 noise (0.35)。
+fault:
+  output_topic: /livox/lidar_faulty
+  seed: 99
+  segments:
+    - {start: 25.0, end: 40.0, type: dropout, ratio: 0.95}
+    - {start: 45.0, end: 60.0, type: fov_crop, az_min_deg: -15, az_max_deg: 15,
+       el_min_deg: -3, el_max_deg: 12}
+    - {start: 70.0, end: 80.0, type: outlier, ratio: 0.20, radius_m: 4.0}
+    - {start: 85.0, end: 95.0, type: noise,   std_m: 0.35}

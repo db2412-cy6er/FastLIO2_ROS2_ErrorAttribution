@@ -64,6 +64,9 @@
 #include <ikd-Tree/ikd_Tree.h>
 #include <Eigen/Eigenvalues>
 #include <limits>
+#include <deque>
+#include <vector>
+#include <algorithm>
 #include <lio_interfaces/msg/degeneracy_score.hpp>
 #include <lio_interfaces/msg/degeneracy_iteration.hpp>
 #include <lio_interfaces/msg/lio_health.hpp>
@@ -178,6 +181,56 @@ int    degeneracy_min_exit  = 5;     // 退出退化所需连续帧数
 bool   health_enable = false;
 double health_imu_window_sec = 0.5;  // rolling IMU 统计窗口 (s)
 rclcpp::Publisher<lio_interfaces::msg::LioHealth>::SharedPtr health_pub_;
+
+/*** ==================== P3 Adaptive LiDAR Weighting ====================
+ * 机制: 把编译期常量 LASER_POINT_COV 换成运行时变量 lidar_meas_cov_:
+ *   lidar_meas_cov_ = LASER_POINT_COV * applied_scale (attack/release EMA)。
+ * 控制信号 (D1, 见 report/P3):
+ *   geometry = P1 ema_score 连续值 → mild (max_geom_scale, 默认 2~10);
+ *   matching = P2 matching severity (attribution_rules.py 复刻) → aggressive
+ *              (max_match_scale, 默认 20~100)。
+ * 保护 (评审 R20/R22):
+ *   下限恒为 1.0 (绝不让 R 小于 baseline); 上限 = max_*_scale;
+ *   fast attack / slow release; 连续高 scale 监测告警 (防正反馈循环)。
+ * 局限 (R3/R9): one-frame delayed feedback controller —— 本帧 IEKF 使用上一帧
+ *   收敛后 degen_data 算出的 scale; 对持续性退化有效, 对 first-frame abrupt
+ *   fault (单帧突发 outlier) 不具备提前保护能力。
+ * 参数来源: 仅 mapping.launch.py launch dict (与 health 同机制, 单一事实源,
+ *   不写 mid360.yaml 防"文档配置"分叉)。默认全关 = 零侵入。
+ ***********************************************************************/
+bool   adaptive_enable = false;
+double adaptive_max_geom_scale = 2.0;    // geometry mild channel 上限
+double adaptive_max_match_scale = 50.0;  // matching aggressive channel 上限
+double adaptive_attack_alpha = 0.5;      // fast attack (进入降权快)
+double adaptive_release_alpha = 0.1;     // slow release (恢复慢, 防权重震荡)
+double adaptive_high_scale_warn_th = 3.0;// 连续高 scale 告警阈值 (默认参数下仅 matching
+                                         // 通道或大 geometry 配置可能触发; 避免正常退化刷屏)
+// P2 matching 阈值 (attribution_params.yaml v1.1 冻结值, 与 attribution_rules.py 一致)
+double adaptive_feats_crit_th = 30.0;    // 低于此直接 matching_failure (severity=1)
+double adaptive_feats_low_th = 150.0;    // 绝对下限
+double adaptive_ratio_low_th = 0.20;     // 有效占比下限
+double adaptive_res_high_th = 0.05;      // mean_residual 异常 (m)
+double adaptive_res_p90_th = 0.08;       // residual_p90 异常 (m)
+double adaptive_ratio_drop_th = 0.30;    // 相对滚动基线占比骤降
+double adaptive_num_drop_th = 0.40;      // 相对滚动基线数量骤降
+double adaptive_ratio_base_window_s = 30.0;  // rolling baseline 窗口 (P2 v1.1 冻结: 长 fault 段防基线污染)
+// P2 geometry 阈值 (P1.3 标定, 冻结不动; severity 复刻 attribution_rules.severity_geometry)
+double adaptive_score_geom_th = 0.50;    // score 高于此 → 几何可观测性弱
+double adaptive_ratio_t_th = 0.10;       // trans_ratio 低于此 → 平动弱约束 (P1.3 corridor 标定值)
+double adaptive_ratio_r_th = 0.02;       // rot_ratio 低于此 → 转动弱约束 (P1 默认)
+// runtime state
+double lidar_meas_cov_ = LASER_POINT_COV;    // 本帧 IEKF 实际使用的 R
+double adaptive_scale_ema_ = 1.0;            // applied scale (EMA)
+double adaptive_geom_scale_det_ = 1.0;       // detected: 本帧几何路 scale
+double adaptive_match_scale_det_ = 1.0;      // detected: 本帧匹配路 scale
+double adaptive_final_scale_det_ = 1.0;      // detected: max(geom, match) (EMA 前)
+bool   adaptive_active_det_ = false;         // detected: final_scale > 1+eps
+double adaptive_high_scale_since_ = 0.0;     // 进入连续高 scale 的时刻 (lidar 时间)
+struct AdaptiveBaselineSample
+{
+  double t; double ratio; double num;
+};
+std::deque<AdaptiveBaselineSample> adaptive_base_buf_;
 
 struct ImuHealthSample
 {
@@ -506,11 +559,150 @@ void publish_lio_health()
   msg.imu_gyr_excitation = gyr_exc;
   msg.imu_acc_excitation = acc_exc;
 
+  // ── P3 Adaptive LiDAR Weighting (detected scales 本帧; lidar_meas_cov applied) ──
+  msg.lidar_meas_cov = lidar_meas_cov_;
+  msg.geometry_scale = adaptive_geom_scale_det_;
+  msg.matching_scale = adaptive_match_scale_det_;
+  msg.final_scale = adaptive_final_scale_det_;
+  msg.adaptive_active = adaptive_active_det_;
+
   msg.pos_x = state_point.pos(0);
   msg.pos_y = state_point.pos(1);
   msg.pos_z = state_point.pos(2);
 
   health_pub_->publish(msg);
+}
+
+/*** P3: Adaptive LiDAR Weighting helper (C++ 版, matching severity 复刻 P2) ***/
+
+// margin helpers (与 attribution_rules.py margin_* 一致)
+static inline double adaptive_clip01(double x)
+{
+  return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
+}
+static inline double adaptive_margin_below(double v, double th, double sat)
+{
+  return sat > 0.0 ? adaptive_clip01((th - v) / sat) : 0.0;
+}
+static inline double adaptive_margin_above(double v, double th, double sat)
+{
+  return sat > 0.0 ? adaptive_clip01((v - th) / sat) : 0.0;
+}
+
+// P2 matching severity [0,1] —— 与 attribution_rules.classify 同公式同阈值 (parity 目标)。
+double compute_adaptive_matching_severity()
+{
+  const double eff_num = static_cast<double>(degen_data.effective_feature_num);
+  const double cand    = static_cast<double>(degen_data.candidate_feature_num);
+  double ratio = degen_data.effective_feature_ratio;
+  if (ratio <= 0.0 && eff_num > 0.0 && cand > 0.0)
+    ratio = eff_num / cand;
+  const double mean_res = degen_data.mean_residual;
+  const double res_p90  = degen_data.residual_p90;
+
+  // rolling baseline (窗口内中位数, 与 attribution_node.py 的 _ratio_hist 一致)
+  const double now = lidar_end_time;
+  adaptive_base_buf_.push_back({now, ratio, eff_num});
+  while (!adaptive_base_buf_.empty() &&
+         now - adaptive_base_buf_.front().t > adaptive_ratio_base_window_s)
+    adaptive_base_buf_.pop_front();
+
+  double ratio_base = 0.0, num_base = 0.0;
+  const bool have_base = (adaptive_base_buf_.size() >= 5);
+  if (have_base)
+  {
+    std::vector<double> rv, nv;
+    rv.reserve(adaptive_base_buf_.size());
+    nv.reserve(adaptive_base_buf_.size());
+    for (const auto &s : adaptive_base_buf_) { rv.push_back(s.ratio); nv.push_back(s.num); }
+    const size_t mid = rv.size() / 2;
+    std::nth_element(rv.begin(), rv.begin() + static_cast<std::ptrdiff_t>(mid), rv.end());
+    std::nth_element(nv.begin(), nv.begin() + static_cast<std::ptrdiff_t>(mid), nv.end());
+    ratio_base = rv[mid];
+    num_base = nv[mid];
+  }
+
+  const bool low_ratio = ratio < adaptive_ratio_low_th;
+  const bool low_feats = eff_num < adaptive_feats_low_th;
+  const bool crit_feats = eff_num < adaptive_feats_crit_th;
+  const bool high_mean = mean_res > adaptive_res_high_th;
+  const bool high_p90 = res_p90 > adaptive_res_p90_th;
+
+  double rel_ratio = -1.0, rel_num = -1.0;
+  if (have_base && ratio_base > 1e-6) rel_ratio = ratio / ratio_base;
+  if (have_base && num_base > 1e-6)   rel_num   = eff_num / num_base;
+  const bool rel_drop = (rel_ratio >= 0.0 && rel_ratio < adaptive_ratio_drop_th) ||
+                        (rel_num   >= 0.0 && rel_num   < adaptive_num_drop_th);
+
+  // is_matching_failure 同 P2 (仅逻辑一致; severity 独立计算):
+  //   low_feats || crit_feats || high_p90 || rel_drop || (low_ratio && high_mean)
+
+  double s = 0.0;
+  s = std::max(s, adaptive_margin_below(ratio,    adaptive_ratio_low_th, adaptive_ratio_low_th));
+  s = std::max(s, adaptive_margin_below(eff_num,  adaptive_feats_low_th, adaptive_feats_low_th));
+  s = std::max(s, adaptive_margin_above(mean_res, adaptive_res_high_th, adaptive_res_high_th));
+  s = std::max(s, adaptive_margin_above(res_p90,  adaptive_res_p90_th,  adaptive_res_p90_th));
+  if (rel_ratio >= 0.0)
+    s = std::max(s, adaptive_margin_below(rel_ratio, adaptive_ratio_drop_th, adaptive_ratio_drop_th));
+  if (rel_num >= 0.0)
+    s = std::max(s, adaptive_margin_below(rel_num,   adaptive_num_drop_th,  adaptive_num_drop_th));
+  if (crit_feats) s = 1.0;
+  return adaptive_clip01(s);
+}
+
+// geometry severity [0,1] —— 复刻 attribution_rules.severity_geometry (score/trans/rot margin 组合)。
+// 与 matching channel 分开: geometry 是 mild (max_geom_scale), matching 是 aggressive。
+double compute_adaptive_geometry_severity()
+{
+  double s = 0.0;
+  s = std::max(s, adaptive_margin_above(degen_data.ema_score,   adaptive_score_geom_th, adaptive_score_geom_th));
+  s = std::max(s, adaptive_margin_below(degen_data.trans_ratio, adaptive_ratio_t_th,    adaptive_ratio_t_th));
+  s = std::max(s, adaptive_margin_below(degen_data.rot_ratio,   adaptive_ratio_r_th,    adaptive_ratio_r_th));
+  return adaptive_clip01(s);
+}
+
+// 每帧 IEKF update 收敛后调用: 用本帧 degen_data 计算 detected scales (发布用)。
+void compute_adaptive_detected_scales()
+{
+  if (!adaptive_enable) return;
+  const double g = compute_adaptive_geometry_severity();
+  const double m = compute_adaptive_matching_severity();
+  adaptive_geom_scale_det_  = 1.0 + (adaptive_max_geom_scale  - 1.0) * g;
+  adaptive_match_scale_det_ = 1.0 + (adaptive_max_match_scale - 1.0) * m;
+  adaptive_final_scale_det_ = std::max(adaptive_geom_scale_det_, adaptive_match_scale_det_);
+  adaptive_active_det_ = adaptive_final_scale_det_ > 1.0 + 1e-6;
+}
+
+// 每帧 IEKF update 前调用: 用上一帧 detected final_scale 更新 applied EMA 并写 lidar_meas_cov_。
+// one-frame delayed feedback: target 是上一帧 compute_adaptive_detected_scales() 的结果。
+void apply_adaptive_lidar_cov()
+{
+  if (!adaptive_enable) { lidar_meas_cov_ = LASER_POINT_COV; return; }
+  const double target = adaptive_final_scale_det_;  // 上一帧 detected (滞后一帧)
+  const double alpha  = (target > adaptive_scale_ema_) ? adaptive_attack_alpha
+                                                       : adaptive_release_alpha;
+  adaptive_scale_ema_ += alpha * (target - adaptive_scale_ema_);
+  const double cap = std::max(adaptive_max_geom_scale, adaptive_max_match_scale);
+  if (adaptive_scale_ema_ < 1.0) adaptive_scale_ema_ = 1.0;  // 下限保护: 不弱于 baseline
+  if (adaptive_scale_ema_ > cap) adaptive_scale_ema_ = cap;  // 上限保护
+  lidar_meas_cov_ = LASER_POINT_COV * adaptive_scale_ema_;
+
+  // 正反馈监测: 连续高 scale 超过 ~5s 告警 (防"匹配差→降权→更漂→更差"循环)
+  const bool high = adaptive_scale_ema_ > adaptive_high_scale_warn_th;
+  const double now = lidar_end_time;
+  if (high)
+  {
+    if (adaptive_high_scale_since_ <= 0.0) adaptive_high_scale_since_ = now;
+    if (now - adaptive_high_scale_since_ > 5.0)
+    {
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("laser_mapping"), *degen_clock_, 5000,
+        "[Adaptive] WARNING: lidar weight scale %.2fx sustained >5s "
+        "(possible feedback loop: matching↓→downweight→drift→matching↓). "
+        "geom_det=%.2f match_det=%.2f", adaptive_scale_ema_,
+        adaptive_geom_scale_det_, adaptive_match_scale_det_);
+    }
+  }
+  else adaptive_high_scale_since_ = 0.0;
 }
 
 void SigHandle(int sig)
@@ -1290,6 +1482,26 @@ public:
         this->declare_parameter<double>("health.imu_window_sec", health_imu_window_sec);
         this->get_parameter_or<bool>("health.enable", health_enable, false);
         this->get_parameter_or<double>("health.imu_window_sec", health_imu_window_sec, 0.5);
+        // P3 adaptive 参数: 经 launch 参数 dict 传入 (唯一参数源, 不写 mid360.yaml)。
+        // 显式 declare 为 bool/double, 使 launch 传入的字符串 override 可正确类型转换。
+        this->declare_parameter<bool>("adaptive.enable", adaptive_enable);
+        this->declare_parameter<double>("adaptive.max_geom_scale", adaptive_max_geom_scale);
+        this->declare_parameter<double>("adaptive.max_match_scale", adaptive_max_match_scale);
+        this->declare_parameter<double>("adaptive.attack_alpha", adaptive_attack_alpha);
+        this->declare_parameter<double>("adaptive.release_alpha", adaptive_release_alpha);
+        this->declare_parameter<double>("adaptive.high_scale_warn_th", adaptive_high_scale_warn_th);
+        this->get_parameter_or<bool>("adaptive.enable", adaptive_enable, false);
+        this->get_parameter_or<double>("adaptive.max_geom_scale", adaptive_max_geom_scale, 2.0);
+        this->get_parameter_or<double>("adaptive.max_match_scale", adaptive_max_match_scale, 50.0);
+        this->get_parameter_or<double>("adaptive.attack_alpha", adaptive_attack_alpha, 0.5);
+        this->get_parameter_or<double>("adaptive.release_alpha", adaptive_release_alpha, 0.1);
+        this->get_parameter_or<double>("adaptive.high_scale_warn_th", adaptive_high_scale_warn_th, 3.0);
+        if (adaptive_enable && !degeneracy_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "adaptive.enable=true 但 degeneracy.enable=false: adaptive 降权不会生效 "
+                "(matching/geometry 信号来自 degeneracy 门控内的 degen_data)");
+        }
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -1475,7 +1687,9 @@ private:
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             degen_data.iter_count = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            // P3: 用上一帧 detected final_scale 更新本帧 applied covariance (one-frame delay)
+            apply_adaptive_lidar_cov();
+            kf.update_iterated_dyn_share_modified(lidar_meas_cov_, solve_H_time);
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1491,6 +1705,12 @@ private:
             {
                 degen_frame_index = frame_num;
                 publish_degeneracy_score();
+            }
+
+            /*** P3: 用本帧 degen_data 计算 detected scales (发布用, one-frame delay 的"检测"端) ***/
+            if (degeneracy_enable && adaptive_enable)
+            {
+                compute_adaptive_detected_scales();
             }
 
             /*** Publish LIO health (P2, same timestamp as degen score) ***/

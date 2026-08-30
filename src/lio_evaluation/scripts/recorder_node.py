@@ -132,6 +132,9 @@ class RecorderNode(Node):
                 "gyr_var0", "gyr_var1", "gyr_var2",
                 "acc_var0", "acc_var1", "acc_var2",
                 "imu_gyr_excitation", "imu_acc_excitation",
+                # P3 adaptive (detected scales 本帧; lidar_meas_cov 是 applied, 滞后一帧)
+                "lidar_meas_cov", "geometry_scale", "matching_scale",
+                "final_scale", "adaptive_active",
                 "pos_x", "pos_y", "pos_z",
             ])
             self._health_handle = (f, w)
@@ -232,6 +235,9 @@ class RecorderNode(Node):
             *[f"{v:.6e}" for v in msg.imu_gyr_var],
             *[f"{v:.6e}" for v in msg.imu_acc_var],
             f"{msg.imu_gyr_excitation:.6e}", f"{msg.imu_acc_excitation:.6e}",
+            f"{msg.lidar_meas_cov:.6e}", f"{msg.geometry_scale:.6f}",
+            f"{msg.matching_scale:.6f}", f"{msg.final_scale:.6f}",
+            int(msg.adaptive_active),
             f"{msg.pos_x:.6f}", f"{msg.pos_y:.6f}", f"{msg.pos_z:.6f}",
         ])
         f.flush()

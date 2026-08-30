@@ -54,6 +54,8 @@ install(PROGRAMS scripts/attribution_validation.py
   DESTINATION lib/${PROJECT_NAME} RENAME attribution_validation)
 install(PROGRAMS scripts/lidar_fault_injector.py
   DESTINATION lib/${PROJECT_NAME} RENAME lidar_fault_injector)
+install(PROGRAMS scripts/parity_check.py
+  DESTINATION lib/${PROJECT_NAME} RENAME parity_check)
 
 # ---- launch / config ----
 install(DIRECTORY launch

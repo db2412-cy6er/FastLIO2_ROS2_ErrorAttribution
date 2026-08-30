@@ -55,6 +55,18 @@ float64[3] imu_acc_var        # 三轴加速度方差 (m/s^2)^2
 float64 imu_gyr_excitation    # RMS(|ω|) (rad/s)
 float64 imu_acc_excitation    # sqrt(var_ax+var_ay+var_az) (m/s^2), 动态激励水平
 
+# ── P3 Adaptive LiDAR Weighting ──
+# 时间语义 (one-frame delayed feedback controller, 见 report/P3):
+#   geometry_scale / matching_scale / final_scale / adaptive_active = 本帧 detected
+#     (由本帧 update 收敛后的 degen_data 算出);
+#   lidar_meas_cov = 本帧 applied (由上一帧 detected final_scale 经 attack/release EMA 决定)。
+# 口径: measurement covariance scale / LiDAR measurement weight, 不是真实物理噪声。
+float64 lidar_meas_cov      # applied: 本帧 IEKF 实际使用的 measurement covariance (m^2 量级)
+float64 geometry_scale      # detected: 本帧几何路 scale (1 = 不放大, mild channel)
+float64 matching_scale      # detected: 本帧匹配路 scale (1 = 不放大, aggressive channel)
+float64 final_scale         # detected: max(geometry_scale, matching_scale) (EMA 前)
+bool   adaptive_active      # detected: final_scale > 1 + 1e-6
+
 # ── 便于日志/回放对齐 ──
 float64 pos_x
 float64 pos_y

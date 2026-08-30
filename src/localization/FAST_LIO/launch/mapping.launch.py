@@ -25,6 +25,13 @@ def generate_launch_description():
     # 的解析缺陷; 与 use_sim_time 同机制)。默认 false = 零侵入。
     health_enable = LaunchConfiguration('health_enable')
     health_imu_window_sec = LaunchConfiguration('health_imu_window_sec')
+    # P3: adaptive LiDAR weighting 参数 (唯一参数源, 不写 mid360.yaml; 默认全关 = 零侵入)。
+    adaptive_enable = LaunchConfiguration('adaptive_enable')
+    adaptive_max_geom_scale = LaunchConfiguration('adaptive_max_geom_scale')
+    adaptive_max_match_scale = LaunchConfiguration('adaptive_max_match_scale')
+    adaptive_attack_alpha = LaunchConfiguration('adaptive_attack_alpha')
+    adaptive_release_alpha = LaunchConfiguration('adaptive_release_alpha')
+    adaptive_high_scale_warn_th = LaunchConfiguration('adaptive_high_scale_warn_th')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -37,6 +44,30 @@ def generate_launch_description():
     declare_health_window_cmd = DeclareLaunchArgument(
         'health_imu_window_sec', default_value='0.5',
         description='P2: rolling IMU excitation 统计窗口 (s)'
+    )
+    declare_adaptive_enable_cmd = DeclareLaunchArgument(
+        'adaptive_enable', default_value='false',
+        description='P3: 自适应 LiDAR 权重 (须同时 degeneracy.enable=true)'
+    )
+    declare_adaptive_geom_cmd = DeclareLaunchArgument(
+        'adaptive_max_geom_scale', default_value='2.0',
+        description='P3: geometry channel 最大 covariance 放大倍数 (mild)'
+    )
+    declare_adaptive_match_cmd = DeclareLaunchArgument(
+        'adaptive_max_match_scale', default_value='50.0',
+        description='P3: matching channel 最大 covariance 放大倍数 (aggressive)'
+    )
+    declare_adaptive_attack_cmd = DeclareLaunchArgument(
+        'adaptive_attack_alpha', default_value='0.5',
+        description='P3: 进入降权 EMA 系数 (fast attack)'
+    )
+    declare_adaptive_release_cmd = DeclareLaunchArgument(
+        'adaptive_release_alpha', default_value='0.1',
+        description='P3: 恢复 EMA 系数 (slow release)'
+    )
+    declare_adaptive_warn_cmd = DeclareLaunchArgument(
+        'adaptive_high_scale_warn_th', default_value='3.0',
+        description='P3: 连续高 scale 告警阈值 (防正反馈循环; 默认仅 matching 通道可触发)'
     )
     declare_config_path_cmd = DeclareLaunchArgument(
         'config_path', default_value=default_config_path,
@@ -61,7 +92,13 @@ def generate_launch_description():
         parameters=[PathJoinSubstitution([config_path, config_file]),
                     {'use_sim_time': use_sim_time,
                      'health.enable': health_enable,
-                     'health.imu_window_sec': health_imu_window_sec}],
+                     'health.imu_window_sec': health_imu_window_sec,
+                     'adaptive.enable': adaptive_enable,
+                     'adaptive.max_geom_scale': adaptive_max_geom_scale,
+                     'adaptive.max_match_scale': adaptive_max_match_scale,
+                     'adaptive.attack_alpha': adaptive_attack_alpha,
+                     'adaptive.release_alpha': adaptive_release_alpha,
+                     'adaptive.high_scale_warn_th': adaptive_high_scale_warn_th}],
         output='screen'
     )
     rviz_node = Node(
@@ -79,6 +116,12 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_path_cmd)
     ld.add_action(declare_health_enable_cmd)
     ld.add_action(declare_health_window_cmd)
+    ld.add_action(declare_adaptive_enable_cmd)
+    ld.add_action(declare_adaptive_geom_cmd)
+    ld.add_action(declare_adaptive_match_cmd)
+    ld.add_action(declare_adaptive_attack_cmd)
+    ld.add_action(declare_adaptive_release_cmd)
+    ld.add_action(declare_adaptive_warn_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(rviz_node)
