@@ -56,6 +56,8 @@ install(PROGRAMS scripts/lidar_fault_injector.py
   DESTINATION lib/${PROJECT_NAME} RENAME lidar_fault_injector)
 install(PROGRAMS scripts/parity_check.py
   DESTINATION lib/${PROJECT_NAME} RENAME parity_check)
+install(PROGRAMS scripts/p3_ab_compare.py
+  DESTINATION lib/${PROJECT_NAME} RENAME p3_ab_compare)
 
 # ---- launch / config ----
 install(DIRECTORY launch

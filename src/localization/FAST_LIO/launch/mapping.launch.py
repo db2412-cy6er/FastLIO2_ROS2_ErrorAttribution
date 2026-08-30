@@ -32,6 +32,7 @@ def generate_launch_description():
     adaptive_attack_alpha = LaunchConfiguration('adaptive_attack_alpha')
     adaptive_release_alpha = LaunchConfiguration('adaptive_release_alpha')
     adaptive_high_scale_warn_th = LaunchConfiguration('adaptive_high_scale_warn_th')
+    adaptive_max_downweight_duration = LaunchConfiguration('adaptive_max_downweight_duration_s')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -69,6 +70,11 @@ def generate_launch_description():
         'adaptive_high_scale_warn_th', default_value='3.0',
         description='P3: 连续高 scale 告警阈值 (防正反馈循环; 默认仅 matching 通道可触发)'
     )
+    declare_adaptive_downweight_cmd = DeclareLaunchArgument(
+        'adaptive_max_downweight_duration_s', default_value='3.0',
+        description='P3: 连续降权时长上限 (s); 超时强制回 baseline, 打破'
+                    '"降权→漂移→失配→误判→继续降权"正反馈循环'
+    )
     declare_config_path_cmd = DeclareLaunchArgument(
         'config_path', default_value=default_config_path,
         description='Yaml config file path'
@@ -98,7 +104,8 @@ def generate_launch_description():
                      'adaptive.max_match_scale': adaptive_max_match_scale,
                      'adaptive.attack_alpha': adaptive_attack_alpha,
                      'adaptive.release_alpha': adaptive_release_alpha,
-                     'adaptive.high_scale_warn_th': adaptive_high_scale_warn_th}],
+                     'adaptive.high_scale_warn_th': adaptive_high_scale_warn_th,
+                     'adaptive.max_downweight_duration_s': adaptive_max_downweight_duration}],
         output='screen'
     )
     rviz_node = Node(
@@ -122,6 +129,7 @@ def generate_launch_description():
     ld.add_action(declare_adaptive_attack_cmd)
     ld.add_action(declare_adaptive_release_cmd)
     ld.add_action(declare_adaptive_warn_cmd)
+    ld.add_action(declare_adaptive_downweight_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(rviz_node)

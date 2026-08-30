@@ -205,6 +205,9 @@ double adaptive_attack_alpha = 0.5;      // fast attack (进入降权快)
 double adaptive_release_alpha = 0.1;     // slow release (恢复慢, 防权重震荡)
 double adaptive_high_scale_warn_th = 3.0;// 连续高 scale 告警阈值 (默认参数下仅 matching
                                          // 通道或大 geometry 配置可能触发; 避免正常退化刷屏)
+double adaptive_max_downweight_duration_s = 3.0;  // 连续降权时长上限: 超时强制回 baseline
+                                         // (打破"降权→漂移→失配→误判匹配失败→继续降权"
+                                         //  的正反馈循环, 评审 R22 的直接实现)
 // P2 matching 阈值 (attribution_params.yaml v1.1 冻结值, 与 attribution_rules.py 一致)
 double adaptive_feats_crit_th = 30.0;    // 低于此直接 matching_failure (severity=1)
 double adaptive_feats_low_th = 150.0;    // 绝对下限
@@ -225,7 +228,8 @@ double adaptive_geom_scale_det_ = 1.0;       // detected: 本帧几何路 scale
 double adaptive_match_scale_det_ = 1.0;      // detected: 本帧匹配路 scale
 double adaptive_final_scale_det_ = 1.0;      // detected: max(geom, match) (EMA 前)
 bool   adaptive_active_det_ = false;         // detected: final_scale > 1+eps
-double adaptive_high_scale_since_ = 0.0;     // 进入连续高 scale 的时刻 (lidar 时间)
+double adaptive_downweight_since_ = 0.0;     // 进入降权(scale>1.1)的时刻, 用于时长上限
+double adaptive_warn_since_ = 0.0;           // 进入高 scale(>warn_th)的时刻, 用于告警
 struct AdaptiveBaselineSample
 {
   double t; double ratio; double num;
@@ -675,11 +679,26 @@ void compute_adaptive_detected_scales()
 
 // 每帧 IEKF update 前调用: 用上一帧 detected final_scale 更新 applied EMA 并写 lidar_meas_cov_。
 // one-frame delayed feedback: target 是上一帧 compute_adaptive_detected_scales() 的结果。
+// 降权时长上限 (R22 直接实现): 连续降权超过 max_downweight_duration_s 后强制 target=1,
+// 让激光重新主导 —— 打破"降权→IMU 漂移→scan-to-map 失配→feats 骤降被误判匹配失败→继续降权"
+// 的正反馈循环 (exp_059 clean65-75 段实证: 无 fault 但 match_scale 升到 15.9x)。
 void apply_adaptive_lidar_cov()
 {
   if (!adaptive_enable) { lidar_meas_cov_ = LASER_POINT_COV; return; }
-  const double target = adaptive_final_scale_det_;  // 上一帧 detected (滞后一帧)
-  const double alpha  = (target > adaptive_scale_ema_) ? adaptive_attack_alpha
+  const double now = lidar_end_time;
+  const double detected = adaptive_final_scale_det_;  // 上一帧 detected (滞后一帧)
+
+  double target = detected;
+  const bool downweighting = adaptive_scale_ema_ > 1.1;
+  if (downweighting)
+  {
+    if (adaptive_downweight_since_ <= 0.0) adaptive_downweight_since_ = now;
+    if (now - adaptive_downweight_since_ > adaptive_max_downweight_duration_s)
+      target = 1.0;  // 超时强制回 baseline (让激光重新主导, 打破正反馈)
+  }
+  else adaptive_downweight_since_ = 0.0;
+
+  const double alpha = (target > adaptive_scale_ema_) ? adaptive_attack_alpha
                                                        : adaptive_release_alpha;
   adaptive_scale_ema_ += alpha * (target - adaptive_scale_ema_);
   const double cap = std::max(adaptive_max_geom_scale, adaptive_max_match_scale);
@@ -687,22 +706,22 @@ void apply_adaptive_lidar_cov()
   if (adaptive_scale_ema_ > cap) adaptive_scale_ema_ = cap;  // 上限保护
   lidar_meas_cov_ = LASER_POINT_COV * adaptive_scale_ema_;
 
-  // 正反馈监测: 连续高 scale 超过 ~5s 告警 (防"匹配差→降权→更漂→更差"循环)
-  const bool high = adaptive_scale_ema_ > adaptive_high_scale_warn_th;
-  const double now = lidar_end_time;
-  if (high)
+  // 正反馈监测告警: 连续高 scale 超过 ~5s 提醒
+  const bool warn_high = adaptive_scale_ema_ > adaptive_high_scale_warn_th;
+  if (warn_high)
   {
-    if (adaptive_high_scale_since_ <= 0.0) adaptive_high_scale_since_ = now;
-    if (now - adaptive_high_scale_since_ > 5.0)
+    if (adaptive_warn_since_ <= 0.0) adaptive_warn_since_ = now;
+    if (now - adaptive_warn_since_ > 5.0)
     {
       RCLCPP_WARN_THROTTLE(rclcpp::get_logger("laser_mapping"), *degen_clock_, 5000,
         "[Adaptive] WARNING: lidar weight scale %.2fx sustained >5s "
-        "(possible feedback loop: matching↓→downweight→drift→matching↓). "
+        "(check feedback loop; downweight duration cap=%.1fs forces recovery). "
         "geom_det=%.2f match_det=%.2f", adaptive_scale_ema_,
+        adaptive_max_downweight_duration_s,
         adaptive_geom_scale_det_, adaptive_match_scale_det_);
     }
   }
-  else adaptive_high_scale_since_ = 0.0;
+  else adaptive_warn_since_ = 0.0;
 }
 
 void SigHandle(int sig)
@@ -1490,12 +1509,16 @@ public:
         this->declare_parameter<double>("adaptive.attack_alpha", adaptive_attack_alpha);
         this->declare_parameter<double>("adaptive.release_alpha", adaptive_release_alpha);
         this->declare_parameter<double>("adaptive.high_scale_warn_th", adaptive_high_scale_warn_th);
+        this->declare_parameter<double>("adaptive.max_downweight_duration_s",
+                                        adaptive_max_downweight_duration_s);
         this->get_parameter_or<bool>("adaptive.enable", adaptive_enable, false);
         this->get_parameter_or<double>("adaptive.max_geom_scale", adaptive_max_geom_scale, 2.0);
         this->get_parameter_or<double>("adaptive.max_match_scale", adaptive_max_match_scale, 50.0);
         this->get_parameter_or<double>("adaptive.attack_alpha", adaptive_attack_alpha, 0.5);
         this->get_parameter_or<double>("adaptive.release_alpha", adaptive_release_alpha, 0.1);
         this->get_parameter_or<double>("adaptive.high_scale_warn_th", adaptive_high_scale_warn_th, 3.0);
+        this->get_parameter_or<double>("adaptive.max_downweight_duration_s",
+                                       adaptive_max_downweight_duration_s, 3.0);
         if (adaptive_enable && !degeneracy_enable)
         {
             RCLCPP_WARN(this->get_logger(),
