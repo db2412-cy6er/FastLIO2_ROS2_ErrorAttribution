@@ -517,10 +517,11 @@ def cmd_run_online(args):
             if not os.path.exists(bag_dir):
                 procs.append(_launch(
                     ["ros2", "bag", "record", "-o", bag_dir,
-                     "/livox/lidar", "/livox/imu", "/gt_odom", "/lio/health"],
+                     "/livox/lidar", "/livox/imu", "/gt_odom"],
                     os.path.join(logdir, "bagrecord.log")))
                 print(f"[run-online] canonical bag 录制: {bag_dir} "
-                      f"(/livox/lidar /livox/imu /gt_odom /lio/health)")
+                      f"(/livox/lidar /livox/imu /gt_odom, 不含 /lio/health — "
+                      f"replay 时由新 FAST-LIO 生成, 避免双路混合)")
         time.sleep(3)  # 等 fast_lio/eval/gt 节点完成发现与启动
 
         # ---- 运动驱动：脚本漫游 / 手动遥控(WASD) / 禁用 ----
