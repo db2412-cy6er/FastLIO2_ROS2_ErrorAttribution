@@ -35,8 +35,11 @@ def _sh(cmd, timeout=None):
                           capture_output=True, text=True, timeout=timeout)
 
 
-def prepare(scenario):
-    r = _sh(["prepare", "--algo", "degen", "--scenario", scenario])
+def prepare(world_or_scenario, is_world=False):
+    if is_world:
+        r = _sh(["prepare", "--algo", "degen", "--world", world_or_scenario])
+    else:
+        r = _sh(["prepare", "--algo", "degen", "--scenario", world_or_scenario])
     m = re.search(r"experiment_(\d+)", r.stdout + r.stderr)
     if not m:
         print("prepare 失败:\n", r.stdout, r.stderr)
@@ -72,7 +75,8 @@ def eval_ate(exp):
     return None
 
 
-def run_batch(bag, scenario, tag, betas, reps, duration, include_degen, fault=None):
+def run_batch(bag, scenario, tag, betas, reps, duration, include_degen, fault=None,
+              is_world=False):
     os.makedirs(EXP_BASE, exist_ok=True)
     out = os.path.join(EXP_BASE, f"p4_batch_{tag}.csv")
     results = []
@@ -92,7 +96,7 @@ def run_batch(bag, scenario, tag, betas, reps, duration, include_degen, fault=No
     for gname, beta in groups:
         for rep in range(1, reps + 1):
             t0 = time.time()
-            exp = prepare(scenario)
+            exp = prepare(scenario, is_world=is_world)
             if not replay(exp, bag, duration, beta=beta, fault=fault):
                 continue
             ate = eval_ate(exp)
@@ -120,8 +124,12 @@ def run_batch(bag, scenario, tag, betas, reps, duration, include_degen, fault=No
 def main():
     ap = argparse.ArgumentParser(description="P4 批量回放 A/B")
     ap.add_argument("--bag", required=True)
-    ap.add_argument("--scenario", required=True,
-                    choices=["normal_room", "corridor", "single_plane", "open_ground"])
+    ap.add_argument("--scenario", required=False,
+                    choices=["normal_room", "corridor", "single_plane", "open_ground"],
+                    help="受控退化场景 (与 --world 二选一)")
+    ap.add_argument("--world", default=None,
+                    help="包内确认地图名 (test_world/normal_indoor/bookstore/hospital); "
+                         "与 --scenario 二选一 (--scenario 优先)")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--beta", type=float, nargs="*", default=[],
                     help="directional beta_t 网格 (可多个)")
@@ -138,8 +146,10 @@ def main():
     fault = None
     if args.fault:
         fault = os.path.abspath(args.fault)
-    run_batch(bag, args.scenario, args.tag, args.beta, args.reps, args.duration,
-              args.include_degen, fault=fault)
+    is_world = bool(not args.scenario and args.world)
+    scene = args.world if is_world else args.scenario
+    run_batch(bag, scene, args.tag, args.beta, args.reps, args.duration,
+              args.include_degen, fault=fault, is_world=is_world)
 
 
 if __name__ == "__main__":
