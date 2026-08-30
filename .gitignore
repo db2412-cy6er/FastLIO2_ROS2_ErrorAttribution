@@ -30,4 +30,5 @@ frames_*.pdf
 
 .claude/
 .codex
-CLAUDE.mdsrc/get_urdf/models/
+CLAUDE.md
+src/get_urdf/models/
