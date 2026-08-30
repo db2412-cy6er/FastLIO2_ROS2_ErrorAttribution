@@ -70,8 +70,13 @@
         # ============ P2 LIO Health Monitor ============
         # 聚合 geometry/matching + filter covariance + IMU excitation,
         # 每帧发布 /lio/health (与 /lio/degeneracy_score 同时间戳)。
-        # enable 默认 false (与 degeneracy.enable=false 同哲学: 零侵入);
-        # 实验时由 run_experiment 显式同时打开 degeneracy.enable + health.enable。
-        health:
-            enable: false                # true 且 degeneracy.enable: true 时发布 /lio/health
-            imu_window_sec: 0.5          # rolling IMU excitation 统计窗口 (s)
+        #
+        # !!! P2.3 冻结: 本段已停用 (仅留档) !!!
+        # rcl_yaml_param_parser 无法解析此嵌套块, 实际生效的是 mapping.launch.py
+        # 的 launch 参数 (health_enable / health_imu_window_sec)。
+        # 为避免"yaml 写的值 ≠ 实际运行值"的复现性隐患, 真实值一律由 launch 提供,
+        # 并在每次实验的 <exp_dir>/config.yaml 中固化 resolved 快照。
+        # 如需修改: 改 launch 默认值, 不要改这里。
+        #health:
+        #    enable: false                # true 且 degeneracy.enable: true 时发布 /lio/health
+        #    imu_window_sec: 0.5          # rolling IMU excitation 统计窗口 (s)

@@ -8,6 +8,7 @@ endif()
 install(DIRECTORY
   launch
   model
+  models
   worlds
   rviz
   DESTINATION share/${PROJECT_NAME}

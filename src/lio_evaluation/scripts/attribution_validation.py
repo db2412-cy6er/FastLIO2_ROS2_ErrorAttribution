@@ -276,21 +276,30 @@ def layer_b_consequence(frames, bounds):
     return out
 
 
-def layer_a_classification(frames, annotations):
-    """第一层: predicted vs scenario_annotations 真值 (原因类别混淆 + PR)。"""
+def layer_a_classification(frames, annotations, buffer_s=3.0):
+    """第一层: predicted vs scenario_annotations 真值 (原因类别混淆 + PR)。
+
+    注: scenario_annotations 的 start/end 以首帧到达时刻为基准 (injector t0),
+    而 frames[t] 是绝对仿真时刻 → 统一减 t0 后再比较 (P2 冻结修复)。
+    buffer_s: fault 段评估用 ±buffer 缓冲 (injector t0 与 health 首帧有 ~2s
+    系统偏差 + 效应建立时间); 与 calibrate_thresholds.py 标定口径一致。
+    """
     if not annotations:
         return None
+    t0 = frames[0]["t"] if frames else 0.0
     classes = sorted({a["ground_truth"] for a in annotations})
     ann_of_frame = {}
     for a in annotations:
         for i, fr in enumerate(frames):
-            if a["start"] <= fr["t"] <= a["end"]:
+            rel = fr["t"] - t0
+            if a["start"] - buffer_s <= rel <= a["end"] + buffer_s:
                 ann_of_frame[i] = a["ground_truth"]
     annotated_idx = [i for i in sorted(ann_of_frame)]
 
     per_annotation = []
     for a in annotations:
-        idx = [i for i in annotated_idx if a["start"] <= frames[i]["t"] <= a["end"]]
+        idx = [i for i in annotated_idx
+               if a["start"] - buffer_s <= frames[i]["t"] - t0 <= a["end"] + buffer_s]
         if not idx:
             per_annotation.append({"name": a["name"], "ground_truth": a["ground_truth"],
                                    "n_frames": 0})
@@ -345,6 +354,8 @@ def main():
     ap.add_argument("--annotations", default=None, help="scenario_annotations.yaml 路径")
     ap.add_argument("--tune", action="store_true",
                     help="从 lio_health.csv 用给定阈值离线重分类")
+    ap.add_argument("--buffer", type=float, default=3.0,
+                    help="fault 段 ±buffer 缓冲评估 (默认 3.0s, 吸收 injector t0 偏差)")
     ap.add_argument("--bands", default="0.05,0.2", help="误差区间边界 LOW/MID/HIGH (m)")
     args = ap.parse_args()
 
@@ -375,7 +386,8 @@ def main():
         sys.exit(1)
 
     consequence = layer_b_consequence(frames, bounds)
-    classification = layer_a_classification(frames, annotations)
+    classification = layer_a_classification(frames, annotations,
+                                            buffer_s=getattr(args, "buffer", 3.0))
 
     report = {
         "n_frames": len(frames),
@@ -412,7 +424,7 @@ def main():
     ax2.set_yticks(list(label_map.values()))
     ax2.set_yticklabels(list(label_map.keys()), fontsize=8)
     ax2.set_ylim(-0.2, len(label_map) - 0.8)
-    ax2.set_ylabel("primary label")
+    ax2.set_ylabel("dominant risk label")
     for a in annotations:
         ax1.axvspan(a["start"] - t0, a["end"] - t0, color="orange", alpha=0.15)
     fig.tight_layout()
@@ -421,7 +433,7 @@ def main():
     plt.close(fig)
 
     print("=== P2 误差归因两层验证 ===")
-    print("label 分布:", {k: round(report["label_distribution"][k], 3) for k in LABELS.values()})
+    print("dominant risk label 分布:", {k: round(report["label_distribution"][k], 3) for k in LABELS.values()})
     for k in LABELS.values():
         c = consequence[k]
         if c:

@@ -10,11 +10,14 @@ attribution_node.py (online) 与 attribution_validation.py --tune (offline)
   Error Attribution -- 本模块输出: 信号级 flags + severity + 主标签 (风险来源)
   Error Consequence -- 由 GT 离线统计 (attribution_validation.py)
 
-核心输出语义:
+核心输出语义 (P2 冻结版):
   - flags (is_geometry_degen / is_matching_failure / is_imu_low_excitation)
     是核心结果, 可同时成立 (真实 LIO 故障中几何退化与低 IMU 激励完全可能共存);
   - severity_* 是 0~1 heuristic 分数 (margin 归一化, 不是概率意义上的置信度);
-  - label 是显示摘要 = argmax(severity_*), tie-break 用可配置 priority;
+  - label 是显示摘要 = dominant_risk_label = argmax(severity_*), tie-break 用可配置
+    priority; 它表示"当前同时存在的多个风险中 dominant 的那一个", 不是互斥的
+    ground-truth class —— 走廊中 GEOMETRY_DEGENERATION 与 IMU_LOW_EXCITATION
+    完全可能同时为 true, 此时 label 只回答"哪个更 dominant";
   - is_imu_low_excitation 只由 IMU 信号判定; imu_risk_score = 低激励 × 依赖几何
     (依赖几何 = 几何弱 或 位置协方差高), 表示"低激励是否正在影响定位"。
 """
@@ -23,7 +26,7 @@ LABELS = {
     0: "NORMAL",
     1: "GEOMETRY_DEGENERATION",
     2: "CORRESPONDENCE_FAILURE",
-    3: "IMU_WEAK_EXCITATION",
+    3: "IMU_LOW_EXCITATION",
 }
 LABEL_IDS = {v: k for k, v in LABELS.items()}
 
@@ -70,7 +73,7 @@ def classify(health, cfg, context=None):
     num_drop_th = c.get("num_drop_th", 0.5)         # 相对有效特征数骤降阈值
     priority = c.get("priority",
                      ["CORRESPONDENCE_FAILURE", "GEOMETRY_DEGENERATION",
-                      "IMU_WEAK_EXCITATION", "NORMAL"])
+                      "IMU_LOW_EXCITATION", "NORMAL"])
 
     # ---- 输入 (缺省安全值) ----
     eff_num = float(h.get("effective_feature_num", 0.0))
@@ -106,8 +109,10 @@ def classify(health, cfg, context=None):
     rel_drop = ((rel_ratio is not None and rel_ratio < ratio_drop_th)
                 or (rel_num is not None and rel_num < num_drop_th))
 
+    # P2 冻结修订: low_feats 独立触发 (数量型退化, 如 dropout/fov_crop 特征骤减但
+    # ratio/残差不变), 不再要求同时 low_ratio 或 high_mean; 否则数量退化会漏检。
     is_matching_failure = bool(
-        (low_feats and (low_ratio or high_mean)) or crit_feats or high_p90 or rel_drop)
+        low_feats or crit_feats or high_p90 or rel_drop or (low_ratio and high_mean))
 
     geom_trigger = (score > score_geom or trans_ratio < ratio_t or rot_ratio < ratio_r)
     is_geometry_degen = bool(geom_trigger and not is_matching_failure)
@@ -158,10 +163,10 @@ def classify(health, cfg, context=None):
         "NORMAL": severity_normal,
         "GEOMETRY_DEGENERATION": severity_geometry,
         "CORRESPONDENCE_FAILURE": severity_correspondence,
-        "IMU_WEAK_EXCITATION": severity_imu_weak,
+        "IMU_LOW_EXCITATION": severity_imu_weak,
     }
 
-    # ========== 主标签 (显示摘要; argmax severity, tie-break 用 priority) ==========
+    # ========== dominant risk label (显示摘要; argmax severity, tie-break 用 priority) ==========
     best = "NORMAL"
     best_s = -1.0
     for name in priority:
@@ -173,6 +178,7 @@ def classify(health, cfg, context=None):
     return {
         "label": LABEL_IDS[best],
         "label_str": best,
+        "dominant_risk_label": best,   # P2 冻结版语义: 与 label 相同; 表示 dominant risk
         "margin": best_s,  # heuristic: 主标签的 severity, 非概率
         "severity_normal": severity_normal,
         "severity_geometry": severity_geometry,

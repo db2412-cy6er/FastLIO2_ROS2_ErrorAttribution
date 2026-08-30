@@ -324,6 +324,38 @@ def generate_scenario(scenario, out_dir):
     return out_path
 
 
+def write_resolved_snapshot(exp_dir, drive=None, fault_cfg=None):
+    """P2.3: 把实际生效的 resolved 参数快照写入实验目录 (config.yaml 追加 + 独立文件)。
+
+    health 参数以 _fastlio_health_args 为准 (degen 门控); attribution 阈值表全文复制
+    到实验目录; fault config 全文复制; drive 参数记录。保证 <exp_dir> 自包含、可复现
+    —— 看任意 experiment 目录即可知那次实验真正运行的阈值/注入/驱动配置。
+    """
+    import shutil
+    resolved = {
+        "resolved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "health": {"enable": _degen_enabled(exp_dir), "imu_window_sec": 0.5,
+                   "via": "mapping.launch.py launch 参数 (mid360.yaml health 段已停用)"},
+    }
+    attr_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "config", "attribution_params.yaml")
+    if os.path.exists(attr_src):
+        shutil.copy(attr_src, os.path.join(exp_dir, "attribution_params.yaml"))
+        resolved["attribution_params_file"] = "attribution_params.yaml (实验目录内快照)"
+    if drive:
+        resolved["drive"] = drive
+    if fault_cfg and os.path.exists(fault_cfg):
+        shutil.copy(fault_cfg, os.path.join(exp_dir, "fault_config.yaml"))
+        resolved["fault_config_file"] = "fault_config.yaml (实验目录内快照)"
+    cfg_path = os.path.join(exp_dir, "config.yaml")
+    with open(cfg_path, "a") as f:
+        f.write("\n# ==== resolved 参数快照 (P2.3 冻结, run-online/replay 写入) ====\n")
+        yaml.dump({"resolved": resolved}, f, default_flow_style=False,
+                  allow_unicode=True, sort_keys=False)
+    print(f"[run-online] resolved 参数快照已写入 {os.path.join(exp_dir, 'config.yaml')}")
+    return resolved
+
+
 def cmd_prepare(args):
     algo = args.algo
     scenario = getattr(args, "scenario", None)
@@ -444,6 +476,11 @@ def cmd_run_online(args):
             config_file = write_fault_lidar_config(exp_dir)
             write_fault_annotations(exp_dir, os.path.abspath(fault_cfg))
             print(f"[run-online] fault injection 已启用: {os.path.abspath(fault_cfg)}")
+        write_resolved_snapshot(
+            exp_dir,
+            drive={"mode": getattr(args, "drive_mode", "wander"),
+                   "pause_sec": getattr(args, "pause_sec", 4.0)},
+            fault_cfg=os.path.abspath(fault_cfg) if fault_cfg else None)
         fastlio_cmd = ["ros2", "launch", "fast_lio", "mapping.launch.py",
                        f"config_path:={exp_dir}", f"config_file:={config_file}",
                        "use_sim_time:=true",
@@ -468,6 +505,22 @@ def cmd_run_online(args):
                  "-p", "use_sim_time:=true", "-p", f"config:={os.path.abspath(fault_cfg)}"],
                 os.path.join(logdir, "injector.log"))
             procs.append(inj)
+        # 5c. canonical bag 录制 (P2.3: 固定输入轨迹供 P3 baseline/adaptive A/B 复放)
+        if getattr(args, "record_bag", None):
+            bag_dir = os.path.abspath(args.record_bag)
+            # ros2 bag record -o 拒绝已存在目录: 空目录先清理, 非空则跳过 (防误覆盖)
+            if os.path.exists(bag_dir):
+                if os.listdir(bag_dir):
+                    print(f"[run-online][WARN] bag 目录非空, 跳过录制: {bag_dir}")
+                else:
+                    os.rmdir(bag_dir)
+            if not os.path.exists(bag_dir):
+                procs.append(_launch(
+                    ["ros2", "bag", "record", "-o", bag_dir,
+                     "/livox/lidar", "/livox/imu", "/gt_odom", "/lio/health"],
+                    os.path.join(logdir, "bagrecord.log")))
+                print(f"[run-online] canonical bag 录制: {bag_dir} "
+                      f"(/livox/lidar /livox/imu /gt_odom /lio/health)")
         time.sleep(3)  # 等 fast_lio/eval/gt 节点完成发现与启动
 
         # ---- 运动驱动：脚本漫游 / 手动遥控(WASD) / 禁用 ----
@@ -571,6 +624,8 @@ def cmd_replay(args):
         write_fault_annotations(exp_dir, injector_path)  # 自动生成对应真值
         print(f"[replay] fault injection 已启用: {injector_path} "
               f"(fastlio 订阅 /livox/lidar_faulty)")
+    write_resolved_snapshot(exp_dir,
+                            fault_cfg=os.path.abspath(fault_cfg) if fault_cfg else None)
 
     procs = []
     print(f"[replay] 回放 {bag} -> {exp_dir}")
@@ -629,7 +684,8 @@ def cmd_all(args):
             no_rviz=args.no_rviz, health_abort=args.health_abort,
             drive_mode=getattr(args, "drive_mode", "wander"),
             pause_sec=getattr(args, "pause_sec", 4.0),
-            fault=getattr(args, "fault", None)))
+            fault=getattr(args, "fault", None),
+            record_bag=getattr(args, "record_bag", None)))
     cmd_eval(argparse.Namespace(exp_dir=exp_dir))
 
 
@@ -662,7 +718,10 @@ def main():
         sp.add_argument("--health-abort", action="store_true",
                         help="健康看门狗检测到翻车时提前中止采集（默认仅记录 health.log）")
         # P2: 驱动模式 (stop_go 制造近静止窗口; const_vel 走廊近匀速直行)
-        sp.add_argument("--drive", choices=["wander", "stop_go", "const_vel"],
+        # 注意: dest 必须是 drive_mode (run-online 内部读 args.drive_mode);
+        # 此前误用 --drive 的默认 dest `drive` 导致 drive_mode 恒为 wander (已修复)。
+        sp.add_argument("--drive", dest="drive_mode",
+                        choices=["wander", "stop_go", "const_vel"],
                         default="wander",
                         help="脚本化驱动模式: wander(漫游) / stop_go(前进-静止) / "
                              "const_vel(低速近匀速直行)")
@@ -685,6 +744,9 @@ def main():
     _add_spawn_args(p_run)
     _add_fault_arg(p_run)
     p_run.add_argument("--duration", type=int, default=60)
+    p_run.add_argument("--record-bag", default=None, metavar="BAG_DIR",
+                       help="P2.3: 实验同时录制 canonical bag 到 BAG_DIR "
+                            "(/livox/lidar /livox/imu /gt_odom /lio/health)")
     p_run.set_defaults(func=cmd_run_online)
 
     p_replay = sub.add_parser("replay")
@@ -704,6 +766,8 @@ def main():
     p_all.add_argument("--algo", choices=["baseline", "degen"], default="degen")
     p_all.add_argument("--duration", type=int, default=60)
     p_all.add_argument("--bag", default=None)
+    p_all.add_argument("--record-bag", default=None, metavar="BAG_DIR",
+                       help="P2.3: run-online 同时录制 canonical bag")
     _add_fault_arg(p_all)
     p_all.set_defaults(func=cmd_all)
 

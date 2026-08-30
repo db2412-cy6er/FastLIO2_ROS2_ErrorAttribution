@@ -1,199 +1,145 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.16)
 project(global_relocalization_kiss_matcher)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Set a default build type if none is specified
-if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    message(STATUS "Setting build type to 'Release' as none was specified.")
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
-    # Provide options for cmake-gui or ccmake
-    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
-endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-cmake_policy(SET CMP0074 NEW)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(USE_ADDRESS_SANITIZER "Use address sanitizer" OFF)
-if (USE_ADDRESS_SANITIZER)
-    add_compile_options(-fsanitize=address -fsanitize-recover=address)
-    add_link_options(-fsanitize=address -fsanitize-recover=address)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-find_package(TBB REQUIRED)
-find_package(robin REQUIRED)
-find_package(kiss_matcher REQUIRED)
-
-# Load small_gicp
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
-include(FetchContent)
-FetchContent_Declare(
-  small_gicp
-  GIT_REPOSITORY https://github.com/koide3/small_gicp
-  GIT_TAG master
-)
-FetchContent_MakeAvailable(small_gicp)
-
 find_package(ament_cmake REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(rcutils REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(OpenMP REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common filters io)
+find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
-find_package(pcl_conversions REQUIRED)
-find_package(PCL REQUIRED)
-find_package(tf2_ros REQUIRED)
+find_package(TBB REQUIRED)
 find_package(tf2_eigen REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
-find_package(tf2_sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
-include_directories(
-    include
-    src
-    ${PCL_INCLUDE_DIRS})
-link_directories(${PCL_LIBRARY_DIRS})
-add_definitions(${PCL_DEFINITIONS})
+# Ubuntu 22.04's libflann-dev does not ship FLANNConfig.cmake.
+find_path(FLANN_INCLUDE_DIR NAMES flann/flann.hpp REQUIRED)
+find_library(FLANN_CPP_LIBRARY NAMES flann_cpp REQUIRED)
 
-find_package(GTSAM REQUIRED)
-find_package(OpenMP REQUIRED)
-
-################################################################################
-add_executable(run_kiss_matcher src/run_kiss_matcher.cpp)
-target_include_directories(run_kiss_matcher
-    PUBLIC
-    ${PCL_INCLUDE_DIRS}
+# Build the pinned ROBIN dependency entirely from local source. Its upstream
+# CMake downloads PMC and xenium unconditionally, so define only the two
+# libraries needed by KISS-Matcher and skip all tools, tests and installers.
+set(THIRD_PARTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party")
+set(PMC_ROOT "${THIRD_PARTY_ROOT}/pmc")
+add_library(pmc_core STATIC
+  ${PMC_ROOT}/pmc_heu.cpp
+  ${PMC_ROOT}/pmc_maxclique.cpp
+  ${PMC_ROOT}/pmcx_maxclique.cpp
+  ${PMC_ROOT}/pmcx_maxclique_basic.cpp
+  ${PMC_ROOT}/pmc_cores.cpp
+  ${PMC_ROOT}/pmc_utils.cpp
+  ${PMC_ROOT}/pmc_graph.cpp
+  ${PMC_ROOT}/pmc_clique_utils.cpp
 )
+set_target_properties(pmc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(pmc_core PUBLIC ${PMC_ROOT}/include)
+target_link_libraries(pmc_core PUBLIC OpenMP::OpenMP_CXX)
 
-target_link_libraries(run_kiss_matcher
-    kiss_matcher::kiss_matcher_core
-    ${PCL_LIBRARIES}
+set(ROBIN_ROOT "${THIRD_PARTY_ROOT}/robin")
+add_library(robin_core STATIC
+  ${ROBIN_ROOT}/src/core.cpp
+  ${ROBIN_ROOT}/src/graph_core.cpp
+  ${ROBIN_ROOT}/src/graph.cpp
+  ${ROBIN_ROOT}/src/graph_io.cpp
+  ${ROBIN_ROOT}/src/graph_solvers.cpp
+  ${ROBIN_ROOT}/src/pkc.cpp
+  ${ROBIN_ROOT}/src/problems.cpp
+  ${ROBIN_ROOT}/src/robin.cpp
+  ${ROBIN_ROOT}/src/utils.cpp
 )
-
-add_executable(registration_visualizer src/registration_visualizer.cpp)
-ament_target_dependencies(registration_visualizer
-  rclcpp
-  tf2_ros
-  sensor_msgs
-  pcl_conversions
-  PCL
+set_target_properties(robin_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(robin_core
+  PUBLIC
+    ${ROBIN_ROOT}/include
+    ${THIRD_PARTY_ROOT}/xenium
 )
-target_link_libraries(registration_visualizer
-  kiss_matcher::kiss_matcher_core
-  ${PCL_LIBRARIES}
-)
-
-add_executable(kiss_matcher_sam src/slam/pose_graph_manager.cpp
-                                src/slam/loop_closure.cpp
-                                src/slam/loop_detector.cpp)
-ament_target_dependencies(kiss_matcher_sam
-  rclcpp
-  tf2_ros
-  sensor_msgs
-  nav_msgs
-  visualization_msgs
-  pcl_conversions
-  PCL
+target_link_libraries(robin_core
+  PUBLIC Eigen3::Eigen
+  PRIVATE pmc_core OpenMP::OpenMP_CXX
 )
 
-target_link_libraries(kiss_matcher_sam
-  kiss_matcher::kiss_matcher_core
-  ${PCL_LIBRARIES}
-  small_gicp
-  gtsam
+# Build only the KISS-Matcher core required by this node. Upstream ROS, Python,
+# examples and pose-graph/SAM targets are intentionally not vendored.
+set(KISS_MATCHER_ROOT "${THIRD_PARTY_ROOT}/kiss_matcher")
+add_library(kiss_matcher_core STATIC
+  ${KISS_MATCHER_ROOT}/core/kiss_matcher/ROBINMatching.cpp
+  ${KISS_MATCHER_ROOT}/core/kiss_matcher/FasterPFH.cpp
+  ${KISS_MATCHER_ROOT}/core/kiss_matcher/KISSMatcher.cpp
+  ${KISS_MATCHER_ROOT}/core/kiss_matcher/GncSolver.cpp
 )
+set_target_properties(kiss_matcher_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(kiss_matcher_core PUBLIC ${KISS_MATCHER_ROOT}/core)
+target_link_libraries(kiss_matcher_core
+  PUBLIC
+    Eigen3::Eigen
+    ${FLANN_CPP_LIBRARY}
+    robin_core
+    TBB::tbb
+    OpenMP::OpenMP_CXX
+)
+target_include_directories(kiss_matcher_core PUBLIC ${FLANN_INCLUDE_DIR})
 
-add_executable(inter_frame_alignment src/inter_frame_alignment.cpp
-                                     src/slam/loop_closure.cpp)
-ament_target_dependencies(inter_frame_alignment
-  rclcpp
-  tf2_ros
-  sensor_msgs
-  nav_msgs
-  visualization_msgs
-  pcl_conversions
-  PCL
-)
-
-target_link_libraries(inter_frame_alignment
-  kiss_matcher::kiss_matcher_core
-  ${PCL_LIBRARIES}
-  small_gicp
-  gtsam
-)
-
-add_library(global_small_gicp_relocalization_node SHARED
-  src/global_small_gicp_relocalization.cpp
-  src/slam/loop_closure.cpp
-)
-target_include_directories(global_small_gicp_relocalization_node PUBLIC include)
-target_link_libraries(global_small_gicp_relocalization_node
-  ${PCL_LIBRARIES}
-  small_gicp
-  OpenMP::OpenMP_CXX
-  kiss_matcher::kiss_matcher_core
-  gtsam
-)
-ament_target_dependencies(global_small_gicp_relocalization_node
-  rclcpp
-  rclcpp_components
-  sensor_msgs
-  geometry_msgs
-  nav_msgs
-  visualization_msgs
-  tf2_ros
-  tf2_eigen
-  pcl_conversions
-)
-rclcpp_components_register_node(global_small_gicp_relocalization_node
-  PLUGIN "global_small_gicp_relocalization::GlobalSmallGicpRelocalizationNode"
-  EXECUTABLE global_small_gicp_relocalization_exec
+# Use the pinned local small_gicp source. This keeps builds offline and avoids
+# repeated FetchContent downloads from every relocalization package.
+set(BUILD_HELPER ON CACHE BOOL "Build small_gicp helper library" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "Disable small_gicp tests" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable small_gicp examples" FORCE)
+set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable small_gicp benchmarks" FORCE)
+set(BUILD_PYTHON_BINDINGS OFF CACHE BOOL "Disable small_gicp Python bindings" FORCE)
+set(BUILD_WITH_TBB OFF CACHE BOOL "Use OpenMP implementation only" FORCE)
+set(BUILD_WITH_PCL OFF CACHE BOOL "PCL adapters are header-only for this node" FORCE)
+add_subdirectory(
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/small_gicp
+  ${CMAKE_CURRENT_BINARY_DIR}/small_gicp
+  EXCLUDE_FROM_ALL
 )
 
 add_library(global_kiss_matcher_relocalization_node SHARED
   src/global_kiss_matcher_relocalization.cpp
-  src/slam/loop_closure.cpp
 )
-target_include_directories(global_kiss_matcher_relocalization_node PUBLIC include)
+target_include_directories(global_kiss_matcher_relocalization_node
+  PUBLIC
+    include
+    ${PCL_INCLUDE_DIRS}
+)
+target_compile_options(global_kiss_matcher_relocalization_node PRIVATE ${PCL_DEFINITIONS})
 target_link_libraries(global_kiss_matcher_relocalization_node
   ${PCL_LIBRARIES}
   small_gicp
+  kiss_matcher_core
   OpenMP::OpenMP_CXX
-  kiss_matcher::kiss_matcher_core
-  gtsam
 )
 ament_target_dependencies(global_kiss_matcher_relocalization_node
+  geometry_msgs
+  pcl_conversions
   rclcpp
   rclcpp_components
   sensor_msgs
-  geometry_msgs
-  nav_msgs
-  visualization_msgs
-  tf2_ros
   tf2_eigen
-  pcl_conversions
+  tf2_ros
 )
+
 rclcpp_components_register_node(global_kiss_matcher_relocalization_node
   PLUGIN "global_kiss_matcher_relocalization::GlobalKissMatcherRelocalizationNode"
   EXECUTABLE global_kiss_matcher_relocalization_exec
 )
 
-install(TARGETS
-  registration_visualizer
-  run_kiss_matcher
-  kiss_matcher_sam
-  inter_frame_alignment
-  global_small_gicp_relocalization_node
-  global_kiss_matcher_relocalization_node
+install(TARGETS global_kiss_matcher_relocalization_node
+  ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
-
-install(DIRECTORY launch config rviz
-  DESTINATION share/${PROJECT_NAME}
-)
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_package()

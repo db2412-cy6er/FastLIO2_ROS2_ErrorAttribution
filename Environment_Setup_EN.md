@@ -161,34 +161,24 @@ Confirm the following:
 - The LiDAR IP in `lidar_configs` matches the actual MID-360.
 - The host and LiDAR are on the same subnet.
 
-### 4.2 KISS-Matcher
+### 4.2 Relocalization Algorithm Dependencies
 
-`scripts/nav2_sim.sh` and `scripts/nav2_real.sh` use `global_relocalization_kiss_matcher` by default. If the build reports missing `kiss_matcher` or `robin`, install the C++ libraries:
+`scripts/nav2_sim.sh` and `scripts/nav2_real.sh` use `global_relocalization_kiss_matcher` by default.
+Pinned KISS-Matcher core and small_gicp sources are stored under `src/registration/third_party/`.
+The build no longer downloads them through FetchContent and does not require `make cppinstall` or
+manual algorithm-library installation under `/usr/local`.
 
-```bash
-cd ~/Lidar_nav2_ws/src/registration/KISS-Matcher
-make deps
-make cppinstall
-```
-
-If ROBIN is already installed and `make cppinstall` fails:
+Use rosdep for Eigen, TBB, FLANN, OpenMP, PCL, and other base dependencies. To minimize peak memory,
+build the relocalization package sequentially:
 
 ```bash
-make cppinstall_matcher_only
-```
-
-### 4.3 small_gicp
-
-If the build reports missing `small_gicp`, install it from source:
-
-```bash
-cd /tmp
-git clone https://github.com/koide3/small_gicp.git
-cd small_gicp
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-sudo cmake --install build
-sudo ldconfig
+cd ~/Lidar_nav2_ws
+source /opt/ros/humble/setup.bash
+CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 colcon build \
+  --executor sequential \
+  --packages-select global_relocalization_kiss_matcher \
+  --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 ```
 
 ## 5. Build
@@ -287,7 +277,6 @@ Before navigation, check the map paths:
 cd ~/Lidar_nav2_ws
 vim src/me_nav2_bringup/launch/my_nav2_launch.py
 vim src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py
-vim src/registration/small_gicp_relocalization/launch/small_gicp_relocalization_launch.py
 ```
 
 Confirm the following:
@@ -388,27 +377,22 @@ source ../install/setup.bash
 
 ```bash
 killall -9 gzserver gzclient
-cd ~/Lidar_nav2_ws/scripts
-./mapping_sim.sh
-```
+### Relocalization Package Build Failure
 
-### Missing `kiss_matcher` or `robin`
-
-```bash
-cd ~/Lidar_nav2_ws/src/registration/KISS-Matcher
-make deps
-make cppinstall
-cd ~/Lidar_nav2_ws/scripts
-./build.sh
-```
-
-### Missing `small_gicp`
+KISS-Matcher core and small_gicp are pinned in the source tree, so no network download is required.
+Verify rosdep dependencies, then clean and rebuild only this package sequentially:
 
 ```bash
-cd /tmp
-git clone https://github.com/koide3/small_gicp.git
-cd small_gicp
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cd ~/Lidar_nav2_ws
+source /opt/ros/humble/setup.bash
+rosdep check --from-paths src --ignore-src --rosdistro humble
+rm -rf build/global_relocalization_kiss_matcher install/global_relocalization_kiss_matcher
+CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 colcon build \
+  --executor sequential \
+  --packages-select global_relocalization_kiss_matcher \
+  --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+```
 cmake --build build -j$(nproc)
 sudo cmake --install build
 sudo ldconfig

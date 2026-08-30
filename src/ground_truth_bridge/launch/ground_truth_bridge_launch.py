@@ -29,6 +29,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'log_file', default_value='',
             description='TUM 格式轨迹日志路径；留空则不写日志'),
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='true',
+            description='是否使用仿真时钟 (仿真必须为 true)'),
 
         Node(
             package='ground_truth_bridge',
@@ -41,6 +44,7 @@ def generate_launch_description():
                 'frame_id': LaunchConfiguration('frame_id'),
                 'timeout_sec': LaunchConfiguration('timeout_sec'),
                 'log_file': LaunchConfiguration('log_file'),
+                'use_sim_time': LaunchConfiguration('use_sim_time'),
             }],
         ),
     ])

@@ -147,7 +147,7 @@
       <wheel_separation>0.41</wheel_separation>
       <wheel_diameter>0.20</wheel_diameter>
       <max_wheel_torque>20</max_wheel_torque>
-      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <max_wheel_acceleration>2.0</max_wheel_acceleration>
 
       <publish_odom>false</publish_odom>
       <publish_odom_tf>false</publish_odom_tf>
@@ -221,7 +221,7 @@
               <max_angle>3.14159</max_angle>
             </horizontal>
             <vertical>
-              <samples>50</samples>
+              <samples>24</samples>
               <resolution>1</resolution>
               <min_angle>-0.126</min_angle>
               <max_angle>0.963</max_angle>

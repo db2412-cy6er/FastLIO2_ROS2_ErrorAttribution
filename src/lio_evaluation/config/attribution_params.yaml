@@ -1,34 +1,54 @@
-# lio_evaluation P2 误差归因阈值表 (Error Attribution)
-# 规则实现单一事实源: scripts/attribution_rules.py (online node 与 offline --tune 共用)。
-# 数值为初始候选, 需在 P2.2 用校准集 (corridor_run1 + fault injection) 离线标定后冻结。
-# 调参流程: python3 scripts/attribution_validation.py <exp_dir> --tune --params <本文件>
+# lio_evaluation P2 误差归因阈值表 (Error Attribution) — 冻结版 v1.1
+# 规则实现单一事实源: scripts/attribution_rules.py (online node 与离线 --tune 共用)。
+# 标定流程: scripts/calibrate_thresholds.py (分路; geometry 不动; matching 用 C3;
+#   IMU 用 motion-state)。
+#
+# P2.3 冻结 (2026-08-30) 标定依据:
+#   - matching 路: 基于 exp_029 (C3 强化 fault, 已知注入窗口) 标定, 目标 fault±3s 段
+#     recall 最大化且 clean fp 低。改动: low_feats 独立触发 (数量退化不漏检);
+#     residual_p90_th 0.20→0.08 (残差更敏感); feats_low_th 100→150 (corridor 数量下限);
+#     ratio_drop_th 0.50→0.30, num_drop_th 0.50→0.40 (相对骤降收紧;
+#     0.7 会误伤干净场景 effnum 正常波动, 已回调);
+#     ratio_baseline_window_s 10→30 (长 fault 段防基线污染)。
+#     验证口径: scenario_annotations 时间基准 = 首帧 (injector t0), 评估用 ±3s 缓冲
+#     (吸收 injector t0 与 health 首帧 ~2s 系统偏差 + 效应建立时间)。
+#   - IMU 路: 基于 exp_037 (const_vel) + exp_038 (stop_go) 的 motion-state 标定
+#     (stationary/const_vel 期望 flag=True, turning/mixed 期望 False), 不用 GT 误差。
+#     stationary 命中 1.00, turning 误报 0.00; const_vel 命中 0.30 (匀速直行 acc
+#     抖动方差 ~0.37, 物理上仍存在平动激励, 属预期).
+#   - geometry 路: P1.3 已标定 (ratio_t_th=0.10 为 corridor 值), 本次不改。
+#
+# 调参流程: python3 scripts/calibrate_thresholds.py --path matching --exps <calib exp>
+#           python3 scripts/attribution_validation.py <exp_dir> --tune --params <本文件>
 
 attribution:
-  # —— geometry 路 ——
+  # —— geometry 路 (P1.3 标定, 冻结不动) ——
   score_geom_th: 0.50            # /lio/health score 高于此 → 几何可观测性弱
   ratio_t_th: 0.10               # trans_ratio 低于此 → 平动弱约束 (P1.3 corridor 标定值)
   ratio_r_th: 0.02               # rot_ratio 低于此 → 转动弱约束 (P1 默认)
 
-  # —— matching 路 ——
-  feats_low_th: 100              # effective_feature_num 绝对下限 (辅助, 随场景泛化弱)
+  # —— matching 路 (P2.3 C3 标定, 冻结) ——
+  feats_low_th: 150              # effective_feature_num 绝对下限 (数量退化独立触发)
   feats_critical_th: 30          # 低于此直接判定匹配失败
-  ratio_low_th: 0.30             # effective_feature_ratio 低于此 → 有效占比不足 (相对指标为主)
-  residual_high_th: 0.10         # mean_residual 高于此 → 残差异常 (m)
-  residual_p90_th: 0.20          # residual_p90 高于此 → 局部匹配恶化 (m, 对退化更敏感)
-  ratio_drop_th: 0.50            # 相对滚动基线的有效占比骤降阈值 (如 dropout 后 ratio 跌一半)
-  num_drop_th: 0.50              # 相对滚动基线的有效特征数骤降阈值
-  ratio_baseline_window_s: 10.0  # 滚动基线窗口 (s, 用于相对骤降判定)
+  ratio_low_th: 0.20             # effective_feature_ratio 低于此 → 有效占比不足
+  residual_high_th: 0.05         # mean_residual 高于此 → 残差异常 (m)
+  residual_p90_th: 0.08          # residual_p90 高于此 → 局部匹配恶化 (m, 更敏感)
+  ratio_drop_th: 0.30            # 相对滚动基线的有效占比骤降阈值
+  num_drop_th: 0.40              # 相对滚动基线的有效特征数骤降阈值
+                                 # (0.7 会误伤干净场景的正常 effnum 波动; 0.4 平衡:
+                                 #  fault 检出主要由 feats_low 绝对阈值承担)
+  ratio_baseline_window_s: 30.0  # 滚动基线窗口 (s, 长 fault 段防基线污染)
 
-  # —— IMU 路 ——
-  gyr_exc_th: 0.05               # imu_gyr_excitation 低于此 → 转动激励不足 (rad/s, 需实测噪声校准)
-  acc_exc_th: 0.15               # imu_acc_excitation 低于此 → 平动动态激励不足 (m/s^2)
+  # —— IMU 路 (P2.3 motion-state 标定, 冻结) ——
+  gyr_exc_th: 0.03               # imu_gyr_excitation 低于此 → 转动激励不足 (rad/s)
+  acc_exc_th: 0.30               # imu_acc_excitation 低于此 → 平动动态激励不足 (m/s^2)
 
   # —— filter 路 (v1 仅辅助确认, 不单独触发) ——
-  cov_pos_high_th: 1.0e-2        # pos_cov_trace 高于此 → 位置不确定度高 (m^2, 量级需按场景校准)
+  cov_pos_high_th: 1.0e-2        # pos_cov_trace 高于此 → 位置不确定度高 (m^2)
 
-  # —— 主标签 tie-break 优先级 (label=argmax severity; 并列时按此顺序取) ——
+  # —— 主标签 tie-break 优先级 (label=dominant_risk_label=argmax severity; 并列时按此顺序取) ——
   priority:
     - CORRESPONDENCE_FAILURE
     - GEOMETRY_DEGENERATION
-    - IMU_WEAK_EXCITATION
+    - IMU_LOW_EXCITATION
     - NORMAL

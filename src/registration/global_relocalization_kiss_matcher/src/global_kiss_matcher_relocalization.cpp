@@ -28,8 +28,8 @@ GlobalKissMatcherRelocalizationNode::GlobalKissMatcherRelocalizationNode(const r
 {
   this->declareParameters();
 
-  const auto lc_config = this->createLoopClosureConfig();
-  reg_module_ = std::make_shared<kiss_matcher::LoopClosure>(lc_config, this->get_logger());
+  kiss_matcher_ = std::make_shared<kiss_matcher::KISSMatcher>(
+    kiss_matcher::KISSMatcherConfig(static_cast<float>(voxel_resolution_)));
 
   if (!init_pose_.empty() && init_pose_.size() >= 6) {
     result_t_.translation() << init_pose_[0], init_pose_[1], init_pose_[2];
@@ -84,14 +84,12 @@ void GlobalKissMatcherRelocalizationNode::declareParameters()
 {
   global_leaf_size_ = this->declare_parameter<double>("global_leaf_size", 0.25);
   registered_leaf_size_ = this->declare_parameter<double>("registered_leaf_size", 0.25);
-  coarse_leaf_size_ = this->declare_parameter<double>("coarse_leaf_size", 0.8);
-  medium_leaf_size_ = this->declare_parameter<double>("medium_leaf_size", 0.5);
-  fine_leaf_size_ = this->declare_parameter<double>("fine_leaf_size", 0.25);
 
   num_threads_ = this->declare_parameter<int>("num_threads", 4);
   num_neighbors_ = this->declare_parameter<int>("num_neighbors", 20);
   max_dist_sq_ = this->declare_parameter<double>("max_dist_sq", 1.0);
   voxel_resolution_ = this->declare_parameter<double>("voxel_resolution", 0.25);
+  kiss_min_inliers_ = this->declare_parameter<int>("kiss_min_inliers", 3);
 
   map_frame_ = this->declare_parameter<std::string>("map_frame", "map");
   odom_frame_ = this->declare_parameter<std::string>("odom_frame", "odom");
@@ -117,31 +115,6 @@ void GlobalKissMatcherRelocalizationNode::declareParameters()
     this->declare_parameter<int>("recovery_min_points", 1000);
   recovery_cooldown_sec_ = 
     this->declare_parameter<double>("recovery_cooldown_sec", 2.0);
-}
-
-kiss_matcher::LoopClosureConfig GlobalKissMatcherRelocalizationNode::createLoopClosureConfig()
-{
-  kiss_matcher::LoopClosureConfig lc_config;
-  auto & gc = lc_config.gicp_config_;
-
-  lc_config.voxel_res_ = voxel_resolution_;
-  lc_config.verbose_ = this->declare_parameter<bool>("loop.verbose", true);
-  lc_config.enable_global_registration_ =
-    this->declare_parameter<bool>("enable_global_registration", true);
-  lc_config.num_inliers_threshold_ =
-    this->declare_parameter<int>("loop.num_inliers_threshold", 3);  // 测试中
-
-  gc.num_threads_ = num_threads_;
-  gc.correspondence_randomness_ =
-    this->declare_parameter<int>("loop.correspondence_randomness", 20);
-  gc.max_num_iter_ = 
-    this->declare_parameter<int>("loop.max_num_iter", 32);
-  gc.scale_factor_for_corr_dist_ =
-    this->declare_parameter<double>("loop.scale_factor_for_corr_dist", 5.0);
-  gc.overlap_threshold_ = 
-    this->declare_parameter<double>("loop.overlap_threshold", 80.0);
-
-  return lc_config;
 }
 
 void GlobalKissMatcherRelocalizationNode::loadGlobalMap(const std::string & file_name)
@@ -193,7 +166,6 @@ void GlobalKissMatcherRelocalizationNode::performRegistration()
   switch (reloc_state_) {
     case RelocState::KISS_GLOBAL_INIT: {
       if (!use_global_initialization_) {
-        initial_aligned_ = true;
         reloc_state_ = RelocState::GICP_TRACKING;
         RCLCPP_INFO(
           this->get_logger(), "KISS global initialization disabled. Switching to GICP tracking.");
@@ -203,8 +175,16 @@ void GlobalKissMatcherRelocalizationNode::performRegistration()
       Eigen::Isometry3d kiss_pose = Eigen::Isometry3d::Identity();
       size_t inliers = 0;
       if (tryKissAlignment(accumulated_cloud_, kiss_pose, inliers)) {
-        result_t_ = previous_result_t_ = kiss_pose;
-        initial_aligned_ = true;
+        Eigen::Isometry3d initialized_pose = kiss_pose;
+        if (verify_kiss_with_gicp_ &&
+          !tryGicpAlignment(accumulated_cloud_, kiss_pose, initialized_pose))
+        {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "KISSMatcher initialization produced a pose, but GICP verification failed.");
+          return;
+        }
+        result_t_ = previous_result_t_ = initialized_pose;
         reloc_state_ = RelocState::GICP_TRACKING;
         gicp_fail_count_ = 0;
         accumulated_cloud_->clear();
@@ -222,7 +202,6 @@ void GlobalKissMatcherRelocalizationNode::performRegistration()
       Eigen::Isometry3d gicp_pose = Eigen::Isometry3d::Identity();
       if (tryGicpAlignment(accumulated_cloud_, previous_result_t_, gicp_pose)) {
         result_t_ = previous_result_t_ = gicp_pose;
-        initial_aligned_ = true;
         reloc_state_ = RelocState::GICP_TRACKING;
         gicp_fail_count_ = 0;
         accumulated_cloud_->clear();
@@ -281,7 +260,6 @@ void GlobalKissMatcherRelocalizationNode::performRegistration()
       }
 
       result_t_ = previous_result_t_ = recovered_pose;
-      initial_aligned_ = true;
       reloc_state_ = RelocState::GICP_TRACKING;
       gicp_fail_count_ = 0;
       accumulated_cloud_->clear();
@@ -312,27 +290,27 @@ bool GlobalKissMatcherRelocalizationNode::tryKissAlignment(
     this->get_logger(), "KISSMatcher alignment: src=%zu, tgt=%zu (downsampled from %zu, %zu)",
     src_down->size(), tgt_down->size(), source_cloud->size(), global_map_->size());
 
-  pcl::PointCloud<PointType>::Ptr src_i(new pcl::PointCloud<PointType>());
-  pcl::PointCloud<PointType>::Ptr tgt_i(new pcl::PointCloud<PointType>());
-  src_i->reserve(src_down->size());
-  tgt_i->reserve(tgt_down->size());
+  std::vector<Eigen::Vector3f> src_points;
+  std::vector<Eigen::Vector3f> tgt_points;
+  src_points.reserve(src_down->size());
+  tgt_points.reserve(tgt_down->size());
 
   for (const auto & p : *src_down) {
-    src_i->push_back({p.x, p.y, p.z, 0.f});
+    src_points.emplace_back(p.x, p.y, p.z);
   }
   for (const auto & p : *tgt_down) {
-    tgt_i->push_back({p.x, p.y, p.z, 0.f});
+    tgt_points.emplace_back(p.x, p.y, p.z);
   }
 
-  const auto & reg_output = reg_module_->coarseToFineAlignment(*src_i, *tgt_i);
-  inliers_out = reg_output.num_final_inliers_;
-  if (!reg_output.is_valid_) {
+  const auto solution = kiss_matcher_->estimate(src_points, tgt_points);
+  inliers_out = kiss_matcher_->getNumFinalInliers();
+  if (!solution.valid || inliers_out < static_cast<size_t>(kiss_min_inliers_)) {
     return false;
   }
 
   pose_out = Eigen::Isometry3d::Identity();
-  pose_out.linear() = reg_output.pose_.block<3, 3>(0, 0);
-  pose_out.translation() = reg_output.pose_.block<3, 1>(0, 3);
+  pose_out.linear() = solution.rotation;
+  pose_out.translation() = solution.translation;
   return true;
 }
 
@@ -414,7 +392,6 @@ void GlobalKissMatcherRelocalizationNode::initialPoseCallback(
     Eigen::Isometry3d map_to_odom = map_to_robot_base * robot_base_to_odom;
 
     previous_result_t_ = result_t_ = map_to_odom;
-    initial_aligned_ = true;
     reloc_state_ = RelocState::GICP_TRACKING;
     gicp_fail_count_ = 0;
     accumulated_cloud_->clear();

@@ -24,7 +24,7 @@
 
 数据管线：
 
-> LiDAR/IMU &rarr; LIO (FAST-LIO 或 Point-LIO) &rarr; TF 桥接 (`lio_interface`) &rarr; odom TF &amp; `/registered_scan` (`sensor_scan_generation`) &rarr; 3D&rarr;2D 切片 (`pointcloud_to_laserscan`) &rarr; 重定位 (`small_gicp_relocalization` 或 `global_relocalization_kiss_matcher`) &rarr; Nav2 (DWB + Navfn)
+> LiDAR/IMU &rarr; LIO (FAST-LIO 或 Point-LIO) &rarr; TF 桥接 (`lio_interface`) &rarr; odom TF &amp; `/registered_scan` (`sensor_scan_generation`) &rarr; 3D&rarr;2D 切片 (`pointcloud_to_laserscan`) &rarr; 融合重定位 (`global_relocalization_kiss_matcher`) &rarr; Nav2 (DWB + Navfn)
 
 TF 坐标树：**`map` &rarr; `odom` &rarr; `base_footprint` &rarr; `chassis` &rarr; `livox_frame`**
 
@@ -75,7 +75,7 @@ cd scripts
 修改以下文件，指向新保存的地图和点云：
 
 - `src/me_nav2_bringup/launch/my_nav2_launch.py` — 设置 `map_yaml_file`
-- `src/registration/small_gicp_relocalization/launch/small_gicp_relocalization_launch.py` — 设置 `prior_pcd_file`
+- `src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py` — 设置 `prior_pcd_file`
 
 然后启动：
 
@@ -102,20 +102,17 @@ cd scripts
 ./nav2_real.sh
 ```
 
-包含 `small_gicp_relocalization`，基于先验 PCD 地图进行重定位。
+包含 `global_relocalization_kiss_matcher`，基于先验 PCD 地图进行全局初始化和连续重定位。
 
-### 3.5 全局重定位：三种方案
+### 3.5 全局重定位
 
-系统提供三种基于先验 PCD 地图的 3D 重定位方案：
+系统保留一套基于先验 PCD 地图的融合重定位方案：
 
-- **KISS-Matcher + small_gicp**：适合机器人初始位姿未知、**"2D Pose Estimate"** 给不准，或纯 small_gicp 因初值偏差过大难以收敛的场景。`global_relocalization_kiss_matcher` 会先累计 `/registered_scan` 做全局粗配准，初始化成功后再切换到 small_gicp 连续跟踪，并持续发布 `map` &rarr; `odom`。
-- **纯 small_gicp**：适合机器人初始位姿大致已知的场景。默认在机器在 (0,0,0) 附近开始收敛，可在 small_gicp_relocalization 的 launch 中自定义开机点位或者在 rviz 中 **"2D Pose Estimate"** 给定初始位姿，再由 `small_gicp_relocalization` 配准到先验地图，收敛更快、流程更简单，持续发布 `map` &rarr; `odom`。
-- **ICP 配准**：适用场景和纯 small_gicp 类似，不过只有开机那一刻进行重定位，后续不再维护 `map` &rarr; `odom`。
+- **KISS-Matcher + small_gicp**：KISS-Matcher 对累计的 `/registered_scan` 做无初值全局粗配准，small_gicp 验证并精配准；初始化成功后由 small_gicp 连续跟踪，并持续发布 `map` &rarr; `odom`。GICP 连续失败时会自动切回 KISS-Matcher 做全局恢复。
 
 使用前先确认先验点云路径正确：
 
 ```bash
-vim src/registration/small_gicp_relocalization/launch/small_gicp_relocalization_launch.py
 vim src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py
 ```
 
@@ -126,9 +123,7 @@ vim src/registration/global_relocalization_kiss_matcher/launch/global_kiss_match
 - `map_frame` / `odom_frame`：默认 `map` / `odom`
 - `base_frame` / `robot_base_frame` / `lidar_frame`：默认 `base_footprint` / `base_footprint` / `livox_frame`
 
-启动时二选一即可，同一时间只能有一个节点发布 `map` &rarr; `odom`。
-
-纯 small_gicp 方案通常已集成在导航脚本中：
+融合重定位已集成在导航脚本中：
 
 ```bash
 source install/setup.bash
@@ -138,18 +133,12 @@ cd scripts
 ./nav2_real.sh
 ```
 
-如果要使用 KISS-Matcher + small_gicp，请先确保 `scripts/nav2_sim.sh` / `scripts/nav2_real.sh` 中没有同时启动 `small_gicp_relocalization`，然后单独启动全局重定位节点：
+也可以在已启动 LIO 和 `/registered_scan` 的环境中单独启动重定位节点：
 
 ```bash
 source install/setup.bash
 cd scripts
 
-# 1. 启动仿真或实机导航主流程
-./nav2_sim.sh
-# 或
-./nav2_real.sh
-
-# 2. 启动 KISS-Matcher 全局重定位节点
 ros2 launch global_relocalization_kiss_matcher global_kiss_matcher_relocalization_launch.py
 ```
 
@@ -188,7 +177,7 @@ cd scripts
 
 ## 4. 功能包
 
-工作空间包含 **20 个 ROS 2 功能包**，位于 `src/` 下：
+工作空间的核心 ROS 2 功能包位于 `src/` 下：
 
 **里程计与定位** (`src/localization/`)
 
@@ -198,9 +187,8 @@ cd scripts
 
 **配准与重定位** (`src/registration/`)
 
-- `small_gicp_relocalization` — 已知大概开机位姿重定位方案：基于 small_gicp 的 3D 点云配准
 - `global_relocalization_kiss_matcher` — KISS-Matcher + small_gicp 全局重定位：无初值粗配准初始化，随后用 GICP 持续跟踪 `map` &rarr; `odom`
-- `KISS-Matcher` — ICRA 2025：快速全局点云配准 (FPFH + TEASER++ + small_gicp)
+- `registration/third_party` — 固定版本的 KISS-Matcher 核心和 small_gicp 源码，仅构建重定位所需功能
 
 **传感器与桥接**
 
@@ -246,9 +234,7 @@ cd scripts
 - `livox_ros_driver2/config/MID360_config.json` — LiDAR 网络配置
 
 **配准配置**
-- `registration/icp_registration/config/icp.yaml` — ICP 配准参数
 - `registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py` — KISS-Matcher 全局重定位启动参数
-- `registration/global_relocalization_kiss_matcher/config/alignment_config.yaml` — KISS-Matcher 帧间/全局配准示例参数
 
 ### 5.2 Nav2 参数要点
 
@@ -359,7 +345,7 @@ killall -9 gzserver gzclient
 
 **KISS-Matcher 全局重定位一直失败** — 检查 `/registered_scan` 是否有数据，确认 `prior_pcd_file` 指向当前环境的 PCD；确保 `base_footprint` &rarr; `livox_frame` TF 可查询；让机器人原地旋转或移动一小段距离以增加累计点云重叠；适当增大 `voxel_resolution` 可降低大地图匹配的内存压力。
 
-**TF 抖动或 Nav2 位姿跳变** — 检查是否同时运行了 `small_gicp_relocalization` 和 `global_relocalization_kiss_matcher`。同一时间只能有一个节点发布 `map` &rarr; `odom`。
+**TF 抖动或 Nav2 位姿跳变** — 检查系统中是否还有其他定位节点发布 `map` &rarr; `odom`；同一时间只能有一个发布者。
 
 **实机 LiDAR 无数据** — 检查网线连接，确认 `MID360_config.json` 中的 IP 地址，确认 Livox-SDK2 已安装。
 

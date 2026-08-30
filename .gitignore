@@ -18,10 +18,16 @@ data/
 *.bag
 /test.pcd
 
+# 构建/编辑器/临时垃圾
+CMakeFiles/
+.last_mapping_log
+.vscode/
+*.pyc
+
 # TF 树调试输出
 frames_*.gv
 frames_*.pdf
 
 .claude/
 .codex
-CLAUDE.md
+CLAUDE.mdsrc/get_urdf/models/

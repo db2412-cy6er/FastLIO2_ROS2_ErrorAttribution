@@ -22,7 +22,7 @@ Key features:
 
 Data pipeline:
 
-> LiDAR/IMU &rarr; LIO (FAST-LIO or Point-LIO) &rarr; TF bridge (`lio_interface`) &rarr; odom TF and `/registered_scan` (`sensor_scan_generation`) &rarr; 3D-to-2D slicing (`pointcloud_to_laserscan`) &rarr; relocalization (`small_gicp_relocalization` or `global_relocalization_kiss_matcher`) &rarr; Nav2 (DWB + Navfn)
+> LiDAR/IMU &rarr; LIO (FAST-LIO or Point-LIO) &rarr; TF bridge (`lio_interface`) &rarr; odom TF and `/registered_scan` (`sensor_scan_generation`) &rarr; 3D-to-2D slicing (`pointcloud_to_laserscan`) &rarr; fused relocalization (`global_relocalization_kiss_matcher`) &rarr; Nav2 (DWB + Navfn)
 
 TF tree: **`map` &rarr; `odom` &rarr; `base_footprint` &rarr; `chassis` &rarr; `livox_frame`**
 
@@ -73,7 +73,7 @@ This command starts Gazebo, FAST-LIO, SLAM Toolbox, Nav2, and the GUI teleoperat
 Edit the following files so they point to the newly saved map and point cloud:
 
 - `src/me_nav2_bringup/launch/my_nav2_launch.py` - Set `map_yaml_file`
-- `src/registration/small_gicp_relocalization/launch/small_gicp_relocalization_launch.py` - Set `prior_pcd_file`
+- `src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py` - Set `prior_pcd_file`
 
 Then start:
 
@@ -100,20 +100,17 @@ cd scripts
 ./nav2_real.sh
 ```
 
-This includes `small_gicp_relocalization` and performs relocalization against a prior PCD map.
+This includes `global_relocalization_kiss_matcher` for global initialization and continuous relocalization against a prior PCD map.
 
-### 3.5 Global Relocalization: Three Options
+### 3.5 Global Relocalization
 
-The system provides three 3D relocalization options based on a prior PCD map:
+The system keeps one fused 3D relocalization pipeline based on a prior PCD map:
 
-- **KISS-Matcher + small_gicp**: Suitable when the robot's initial pose is unknown, **"2D Pose Estimate"** is inaccurate, or pure small_gicp cannot converge because the initial guess is too far from the true pose. `global_relocalization_kiss_matcher` first accumulates `/registered_scan` for global coarse registration. After successful initialization, it switches to small_gicp continuous tracking and continuously publishes `map` &rarr; `odom`.
-- **Pure small_gicp**: Suitable when the robot's approximate initial pose is known. By default, it starts converging near (0,0,0). You can customize the startup pose in the `small_gicp_relocalization` launch file or provide an initial pose in RViz with **"2D Pose Estimate"**. `small_gicp_relocalization` then registers against the prior map, converges faster, keeps the workflow simpler, and continuously publishes `map` &rarr; `odom`.
-- **ICP registration**: Similar use case to pure small_gicp, but relocalization is performed only once at startup. It does not continue maintaining `map` &rarr; `odom`.
+- **KISS-Matcher + small_gicp**: KISS-Matcher performs global coarse registration on accumulated `/registered_scan` data without an initial guess. small_gicp verifies and refines the result, then continuously tracks and publishes `map` &rarr; `odom`. After consecutive GICP failures, the node automatically returns to KISS-Matcher global recovery.
 
 Before use, confirm that the prior point-cloud path is correct:
 
 ```bash
-vim src/registration/small_gicp_relocalization/launch/small_gicp_relocalization_launch.py
 vim src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py
 ```
 
@@ -124,9 +121,7 @@ Check the following carefully:
 - `map_frame` / `odom_frame`: Default is `map` / `odom`
 - `base_frame` / `robot_base_frame` / `lidar_frame`: Default is `base_footprint` / `base_footprint` / `livox_frame`
 
-Choose only one relocalization node at launch time. Only one node may publish `map` &rarr; `odom` at the same time.
-
-The pure small_gicp option is usually already integrated into the navigation scripts:
+The fused relocalization node is integrated into the navigation scripts:
 
 ```bash
 source install/setup.bash
@@ -136,18 +131,12 @@ cd scripts
 ./nav2_real.sh
 ```
 
-To use KISS-Matcher + small_gicp, first make sure `scripts/nav2_sim.sh` / `scripts/nav2_real.sh` does not also start `small_gicp_relocalization`, then start the global relocalization node separately:
+It can also be started independently after LIO and `/registered_scan` are available:
 
 ```bash
 source install/setup.bash
 cd scripts
 
-# 1. Start the main simulation or real-robot navigation workflow
-./nav2_sim.sh
-# or
-./nav2_real.sh
-
-# 2. Start the KISS-Matcher global relocalization node
 ros2 launch global_relocalization_kiss_matcher global_kiss_matcher_relocalization_launch.py
 ```
 
@@ -162,7 +151,7 @@ When `KISSMatcher initialization succeeded` appears in the log, global initializ
 
 ## 4. Packages
 
-The workspace contains **19 ROS 2 packages** under `src/`:
+The core ROS 2 packages are located under `src/`:
 
 **Odometry and Localization** (`src/localization/`)
 
@@ -172,9 +161,8 @@ The workspace contains **19 ROS 2 packages** under `src/`:
 
 **Registration and Relocalization** (`src/registration/`)
 
-- `small_gicp_relocalization` - Relocalization when the approximate startup pose is known: 3D point-cloud registration based on small_gicp
 - `global_relocalization_kiss_matcher` - KISS-Matcher + small_gicp global relocalization: coarse registration without an initial guess, followed by GICP continuous tracking of `map` &rarr; `odom`
-- `KISS-Matcher` - ICRA 2025: Fast global point-cloud registration (FPFH + TEASER++ + small_gicp)
+- `registration/third_party` - Pinned KISS-Matcher core and small_gicp sources; only relocalization-required code is built
 
 **Sensors and Bridging**
 
@@ -216,9 +204,7 @@ The workspace contains **19 ROS 2 packages** under `src/`:
 - `livox_ros_driver2/config/MID360_config.json` - LiDAR network configuration
 
 **Registration configuration**
-- `registration/icp_registration/config/icp.yaml` - ICP registration parameters
 - `registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py` - KISS-Matcher global relocalization launch parameters
-- `registration/global_relocalization_kiss_matcher/config/alignment_config.yaml` - Example KISS-Matcher frame-to-frame/global registration parameters
 
 ### 5.2 Nav2 Parameter Highlights
 
@@ -326,7 +312,7 @@ killall -9 gzserver gzclient
 
 **KISS-Matcher global relocalization keeps failing** - Check whether `/registered_scan` has data, confirm that `prior_pcd_file` points to the PCD of the current environment, ensure that the `base_footprint` &rarr; `livox_frame` TF can be queried, rotate the robot in place or move a short distance to increase accumulated point-cloud overlap, and consider increasing `voxel_resolution` to reduce memory pressure for large-map matching.
 
-**TF jitter or Nav2 pose jumps** - Check whether `small_gicp_relocalization` and `global_relocalization_kiss_matcher` are running at the same time. Only one node may publish `map` &rarr; `odom` at once.
+**TF jitter or Nav2 pose jumps** - Check whether another localization node is also publishing `map` &rarr; `odom`. Only one publisher may provide this transform at a time.
 
 **Real LiDAR has no data** - Check the Ethernet connection, confirm the IP addresses in `MID360_config.json`, and confirm that Livox-SDK2 is installed.
 

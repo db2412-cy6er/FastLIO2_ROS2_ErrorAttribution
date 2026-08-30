@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "kiss_matcher/KISSMatcher.hpp"
 #include "pcl/common/transforms.h"
 #include "pcl_conversions/pcl_conversions.h"
 #include "small_gicp/pcl/pcl_registration.hpp"
@@ -24,7 +25,6 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "tf2_ros/transform_listener.h"
 
-#include "slam/loop_closure.h"
 #include "global_kiss_matcher_relocalization/packet.hpp"
 
 namespace global_kiss_matcher_relocalization
@@ -37,7 +37,6 @@ public:
 
 private:
   void declareParameters();
-  kiss_matcher::LoopClosureConfig createLoopClosureConfig();
   void registeredPcdCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
   void loadGlobalMap(const std::string & file_name);
   void performRegistration();
@@ -58,14 +57,12 @@ private:
   RelocState reloc_state_;  // 重定位状态机
   double global_leaf_size_;
   double registered_leaf_size_;
-  double coarse_leaf_size_;
-  double medium_leaf_size_;
-  double fine_leaf_size_;
 
   int num_threads_;
   int num_neighbors_;
   double max_dist_sq_;
   double voxel_resolution_;
+  int kiss_min_inliers_;
   std::vector<double> init_pose_;
 
   std::string map_frame_;
@@ -81,7 +78,6 @@ private:
   Eigen::Isometry3d previous_result_t_;
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr global_map_;
-  pcl::PointCloud<pcl::PointXYZ>::Ptr registered_scan_;
   pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_cloud_;
 
   pcl::PointCloud<pcl::PointCovariance>::Ptr target_;
@@ -102,8 +98,7 @@ private:
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   // KISSMatcher global initialization
-  std::shared_ptr<kiss_matcher::LoopClosure> reg_module_;
-  bool initial_aligned_ = false;
+  std::shared_ptr<kiss_matcher::KISSMatcher> kiss_matcher_;
   bool use_global_initialization_;
   bool use_kiss_recovery_;
   bool verify_kiss_with_gicp_;

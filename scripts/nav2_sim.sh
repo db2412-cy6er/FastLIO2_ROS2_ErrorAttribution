@@ -79,12 +79,7 @@ gnome-terminal --title="3d点云转2d" -- bash -c "
 source install/setup.bash;
 ros2 launch me_nav2_bringup pointcloud_to_laserscan_launch.py"
 
-# 重定位（二选一）：有初值用 small_gicp，无初值用 KISS-Matcher
-# gnome-terminal --title="small_gicp 重定位" -- bash -c "
-# source install/setup.bash;
-# ros2 launch small_gicp_relocalization small_gicp_relocalization_launch.py \\
-#   prior_pcd_file:=$PCD use_sim_time:=true"
-
+# KISS-Matcher 全局初始化 + small_gicp 连续跟踪
 gnome-terminal --title="KISS + GICP 重定位" -- bash -c "
 source install/setup.bash;
 ros2 launch global_relocalization_kiss_matcher global_kiss_matcher_relocalization_launch.py \\
