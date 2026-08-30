@@ -197,6 +197,28 @@ def _fastlio_adaptive_args(exp_dir, adaptive=False, max_geom=None, max_match=Non
     return args
 
 
+def _fastlio_directional_args(exp_dir, directional=False, beta_t=None, beta_r=None,
+                              ht_accum_enable=False, ht_accum_alpha=None):
+    """fastlio launch 附加 P4 directional 参数 (唯一参数源 = launch, 依赖 degeneracy 门控)。
+
+    --directional 时返回 directional_enable:=true (+ 可选 beta/累积覆盖)。
+    P4 评审 R29: 与 --adaptive 正式实验互斥 (这里不强硬拦截, 由实验者纪律保证;
+    C++ 侧会打 WARN 提示)。
+    """
+    if not directional or not _degen_enabled(exp_dir):
+        return []
+    args = ["directional_enable:=true"]
+    if beta_t is not None:
+        args.append(f"directional_beta_t:={beta_t}")
+    if beta_r is not None:
+        args.append(f"directional_beta_r:={beta_r}")
+    if ht_accum_enable:
+        args.append("directional_ht_accum_enable:=true")
+        if ht_accum_alpha is not None:
+            args.append(f"directional_ht_accum_alpha:={ht_accum_alpha}")
+    return args
+
+
 def _normalize_world(w):
     """world 参数规范化：
     - 绝对路径 → 原样（实验期生成夹具，get_urdf_launch 按绝对路径加载）
@@ -340,11 +362,12 @@ def generate_scenario(scenario, out_dir):
     return out_path
 
 
-def write_resolved_snapshot(exp_dir, drive=None, fault_cfg=None, adaptive=None):
-    """P2.3/P3: 把实际生效的 resolved 参数快照写入实验目录 (config.yaml 追加 + 独立文件)。
+def write_resolved_snapshot(exp_dir, drive=None, fault_cfg=None, adaptive=None,
+                            directional=None):
+    """P2.3/P3/P4: 把实际生效的 resolved 参数快照写入实验目录 (config.yaml 追加 + 独立文件)。
 
-    health 参数以 _fastlio_health_args 为准 (degen 门控); P3 adaptive 参数以
-    _fastlio_adaptive_args 为准 (唯一参数源 = launch); attribution 阈值表全文复制
+    health 参数以 _fastlio_health_args 为准 (degen 门控); P3 adaptive / P4 directional
+    参数以 _fastlio_*_args 为准 (唯一参数源 = launch); attribution 阈值表全文复制
     到实验目录; fault config 全文复制; drive 参数记录。保证 <exp_dir> 自包含、可复现
     —— 看任意 experiment 目录即可知那次实验真正运行的阈值/注入/驱动配置。
     """
@@ -355,6 +378,8 @@ def write_resolved_snapshot(exp_dir, drive=None, fault_cfg=None, adaptive=None):
                    "via": "mapping.launch.py launch 参数 (mid360.yaml health 段已停用)"},
         "adaptive": {"enable": False,
                      "via": "mapping.launch.py launch 参数 (唯一参数源, mid360.yaml 无 adaptive 段)"},
+        "directional": {"enable": False,
+                        "via": "mapping.launch.py launch 参数 (唯一参数源, mid360.yaml 无 directional 段)"},
     }
     if adaptive:
         resolved["adaptive"]["enable"] = bool(adaptive.get("enable", False))
@@ -366,6 +391,19 @@ def write_resolved_snapshot(exp_dir, drive=None, fault_cfg=None, adaptive=None):
             adaptive=bool(adaptive.get("enable", False)),
             max_geom=adaptive.get("max_geom_scale"),
             max_match=adaptive.get("max_match_scale"))
+    if directional:
+        resolved["directional"]["enable"] = bool(directional.get("enable", False))
+        resolved["directional"]["beta_t"] = directional.get("beta_t")
+        resolved["directional"]["beta_r"] = directional.get("beta_r")
+        resolved["directional"]["ht_accum_enable"] = bool(directional.get("ht_accum_enable", False))
+        resolved["directional"]["ht_accum_alpha"] = directional.get("ht_accum_alpha")
+        resolved["directional"]["launch_args"] = _fastlio_directional_args(
+            exp_dir,
+            directional=bool(directional.get("enable", False)),
+            beta_t=directional.get("beta_t"),
+            beta_r=directional.get("beta_r"),
+            ht_accum_enable=bool(directional.get("ht_accum_enable", False)),
+            ht_accum_alpha=directional.get("ht_accum_alpha"))
     attr_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "..", "config", "attribution_params.yaml")
     if os.path.exists(attr_src):
@@ -512,7 +550,12 @@ def cmd_run_online(args):
             fault_cfg=os.path.abspath(fault_cfg) if fault_cfg else None,
             adaptive={"enable": bool(getattr(args, "adaptive", False)),
                       "max_geom_scale": getattr(args, "adaptive_max_geom_scale", None),
-                      "max_match_scale": getattr(args, "adaptive_max_match_scale", None)})
+                      "max_match_scale": getattr(args, "adaptive_max_match_scale", None)},
+            directional={"enable": bool(getattr(args, "directional", False)),
+                         "beta_t": getattr(args, "directional_beta_t", None),
+                         "beta_r": getattr(args, "directional_beta_r", None),
+                         "ht_accum_enable": bool(getattr(args, "directional_ht_accum_enable", False)),
+                         "ht_accum_alpha": getattr(args, "directional_ht_accum_alpha", None)})
         fastlio_cmd = ["ros2", "launch", "fast_lio", "mapping.launch.py",
                        f"config_path:={exp_dir}", f"config_file:={config_file}",
                        "use_sim_time:=true",
@@ -520,7 +563,13 @@ def cmd_run_online(args):
                        *_fastlio_adaptive_args(exp_dir,
                                                getattr(args, "adaptive", False),
                                                getattr(args, "adaptive_max_geom_scale", None),
-                                               getattr(args, "adaptive_max_match_scale", None))]
+                                               getattr(args, "adaptive_max_match_scale", None)),
+                       *_fastlio_directional_args(exp_dir,
+                                                  getattr(args, "directional", False),
+                                                  getattr(args, "directional_beta_t", None),
+                                                  getattr(args, "directional_beta_r", None),
+                                                  bool(getattr(args, "directional_ht_accum_enable", False)),
+                                                  getattr(args, "directional_ht_accum_alpha", None))]
         if getattr(args, "no_rviz", False):
             fastlio_cmd.append("rviz:=false")  # fast_lio 自带 rviz2, 软渲染消耗大
         procs.append(_launch(fastlio_cmd, os.path.join(logdir, "fastlio.log")))
@@ -665,7 +714,12 @@ def cmd_replay(args):
                             fault_cfg=os.path.abspath(fault_cfg) if fault_cfg else None,
                             adaptive={"enable": bool(getattr(args, "adaptive", False)),
                                       "max_geom_scale": getattr(args, "adaptive_max_geom_scale", None),
-                                      "max_match_scale": getattr(args, "adaptive_max_match_scale", None)})
+                                      "max_match_scale": getattr(args, "adaptive_max_match_scale", None)},
+                            directional={"enable": bool(getattr(args, "directional", False)),
+                                         "beta_t": getattr(args, "directional_beta_t", None),
+                                         "beta_r": getattr(args, "directional_beta_r", None),
+                                         "ht_accum_enable": bool(getattr(args, "directional_ht_accum_enable", False)),
+                                         "ht_accum_alpha": getattr(args, "directional_ht_accum_alpha", None)})
 
     procs = []
     print(f"[replay] 回放 {bag} -> {exp_dir}")
@@ -679,6 +733,12 @@ def cmd_replay(args):
                                      getattr(args, "adaptive", False),
                                      getattr(args, "adaptive_max_geom_scale", None),
                                      getattr(args, "adaptive_max_match_scale", None)),
+             *_fastlio_directional_args(exp_dir,
+                                        getattr(args, "directional", False),
+                                        getattr(args, "directional_beta_t", None),
+                                        getattr(args, "directional_beta_r", None),
+                                        bool(getattr(args, "directional_ht_accum_enable", False)),
+                                        getattr(args, "directional_ht_accum_alpha", None)),
              *(["rviz:=false"] if getattr(args, "no_rviz", False) else [])],
             os.path.join(logdir, "fastlio.log")))
         procs.append(_launch(
@@ -798,6 +858,22 @@ def main():
                         help="P3: matching channel 最大 covariance 放大倍数 "
                              "(默认 launch 50.0, aggressive)")
 
+    def _add_directional_arg(sp):
+        sp.add_argument("--directional", action="store_true",
+                        help="P4: 启用方向性状态 correction 抑制 (directional.enable=true, "
+                             "须 --algo degen / degeneracy.enable=true; 与 --adaptive 正式实验互斥)")
+        sp.add_argument("--directional-beta-t", type=float, default=None,
+                        metavar="X",
+                        help="P4: 平动弱方向 correction 保留系数 (默认 launch 0.5)")
+        sp.add_argument("--directional-beta-r", type=float, default=None,
+                        metavar="X",
+                        help="P4: 转动弱方向保留系数 (v1 恒 1, 不抑制转动)")
+        sp.add_argument("--directional-ht-accum-enable", action="store_true",
+                        help="P4: Ht 时间累积弱方向 (先累积 Ht 再特征分解, 防 sign ambiguity)")
+        sp.add_argument("--directional-ht-accum-alpha", type=float, default=None,
+                        metavar="X",
+                        help="P4: Ht_cum = alpha*Ht + (1-alpha)*Ht_cum 的 alpha (默认 launch 0.5)")
+
     p_prepare = sub.add_parser("prepare")
     _add_world_args(p_prepare)
     p_prepare.add_argument("--algo", choices=["baseline", "degen"], default="degen")
@@ -809,6 +885,7 @@ def main():
     _add_spawn_args(p_run)
     _add_fault_arg(p_run)
     _add_adaptive_arg(p_run)
+    _add_directional_arg(p_run)
     p_run.add_argument("--duration", type=int, default=60)
     p_run.add_argument("--record-bag", default=None, metavar="BAG_DIR",
                        help="P2.3: 实验同时录制 canonical bag 到 BAG_DIR "
@@ -821,6 +898,7 @@ def main():
     p_replay.add_argument("--duration", type=int, default=60)
     _add_fault_arg(p_replay)
     _add_adaptive_arg(p_replay)
+    _add_directional_arg(p_replay)
     p_replay.set_defaults(func=cmd_replay)
 
     p_eval = sub.add_parser("eval")
