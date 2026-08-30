@@ -135,6 +135,10 @@ class RecorderNode(Node):
                 # P3 adaptive (detected scales 本帧; lidar_meas_cov 是 applied, 滞后一帧)
                 "lidar_meas_cov", "geometry_scale", "matching_scale",
                 "final_scale", "adaptive_active",
+                # P4 directional (applied 本帧; severity/gate 本帧 detected)
+                "directional_active", "beta_applied",
+                "swd0", "swd1", "swd2",          # suppressed_weak_direction (世界系)
+                "directional_reason", "translation_severity", "matching_gate_passed",
                 "pos_x", "pos_y", "pos_z",
             ])
             self._health_handle = (f, w)
@@ -238,6 +242,10 @@ class RecorderNode(Node):
             f"{msg.lidar_meas_cov:.6e}", f"{msg.geometry_scale:.6f}",
             f"{msg.matching_scale:.6f}", f"{msg.final_scale:.6f}",
             int(msg.adaptive_active),
+            int(msg.directional_active), f"{msg.beta_applied:.6f}",
+            *[f"{v:.6f}" for v in msg.suppressed_weak_direction],
+            msg.directional_reason, f"{msg.translation_severity:.6f}",
+            int(msg.matching_gate_passed),
             f"{msg.pos_x:.6f}", f"{msg.pos_y:.6f}", f"{msg.pos_z:.6f}",
         ])
         f.flush()
