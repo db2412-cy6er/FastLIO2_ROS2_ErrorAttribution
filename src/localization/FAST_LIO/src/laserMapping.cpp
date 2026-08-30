@@ -236,6 +236,53 @@ struct AdaptiveBaselineSample
 };
 std::deque<AdaptiveBaselineSample> adaptive_base_buf_;
 
+/*** ==================== P4 Attribution-aware Directional Update ====================
+ * 机制: 在 esekfom::update_iterated_dyn_share_modified 的 state correction 层做
+ *   directional projector —— 本帧 IEKF 对 pos(世界系) 沿 weak translation direction
+ *   的 correction 保留 beta_t 倍, 强方向不动; K_x 的 pos 行同步投影保持 covariance 一致
+ *   (P4 评审 R1/R3/R4/R8; sanity E2/E3 数值验证)。
+ * 触发 (R14/R15/R16): 仅当 translation geometry 退化 (trans_ratio < ratio_t_th)
+ *   且 P2 matching gate 通过 (is_matching_failure == false) 时允许。matching failure 时
+ *   关闭 projector —— 错误 correspondence 构造的 weak direction 无物理意义。
+ * 信号路径 (R6/R7): P1 检测器 (compute_geometric_hessian) 永远基于原始 h_x;
+ *   P4 控制器只作用在 esekfom state 层, 两者数据路径严格分离, 无自反馈污染。
+ * 时序: one-frame delay —— 本帧 IEKF 用上一帧 update 后 dir_cache_ 的方向/ratio。
+ * v1 范围: 仅平动 (beta_r 恒 1)。未来转动抑制时, body 系弱方向需 R_prev->R_cur 变换
+ *   (见 esekfom.hpp 注释, R10)。参数唯一来源 = mapping.launch.py launch dict。
+ * 与 P3 关系: --adaptive 与 --directional 正式实验互斥 (R29); 本块不依赖 adaptive_enable。
+ ***********************************************************************/
+bool directional_enable = false;
+double directional_beta_t = 0.5;         // 平动弱方向 correction 保留系数 (0=完全抑制, 1=不抑制)
+double directional_beta_r = 1.0;         // v1 恒 1: 不抑制转动 (保留接口, R10 见 esekfom 注释)
+bool directional_ht_accum_enable = false;// Ht 时间累积独立开关 (R13: 不用 0 值承担"关闭"语义)
+double directional_ht_accum_alpha = 0.5; // Ht_cum = a*Ht + (1-a)*Ht_cum, 再特征分解 → 稳定弱方向
+bool directional_imu_safety_limiter_enable = false;  // v1 仅记录/接口预留 (R17)
+double directional_imu_beta_floor = 0.5; // IMU 低激励时的 beta 下限 (安全联动, 默认不启用)
+// P2 冻结阈值 (attribution_params.yaml v1.1, 与 attribution_rules.py / P3 matching 同源)
+double directional_ratio_t_th = 0.10;    // trans_ratio 低于此 → translation 退化 (P1.3 corridor 标定)
+double directional_gyr_exc_th = 0.03;    // imu_gyr_excitation 低于此 → 转动激励不足
+double directional_acc_exc_th = 0.30;    // imu_acc_excitation 低于此 → 平动激励不足
+// P4 rolling baseline (P2 matching 相对骤降判定; 独立 buffer, 与 P3 adaptive 数据路径分离)
+std::deque<AdaptiveBaselineSample> directional_base_buf_;
+
+struct DirectionalCache
+{
+  bool valid = false;
+  double trans_ratio = 1.0;              // 上帧 Ht ratio (world-frame translation)
+  bool matching_ok = true;               // 上帧 P2 is_matching_failure == false
+  Eigen::Vector3d weak_translation_direction = Eigen::Vector3d::UnitX(); // 上帧 Ht 最小特征向量 (世界系, 归一化)
+  bool imu_low_excitation = false;       // 上帧 is_imu_low_excitation (gyr_weak && acc_weak)
+};
+DirectionalCache dir_cache_;
+// P4 发布状态 (本帧 IEKF 实际生效; msg 输出用于事后归因 R26)
+bool dir_active_ = false;
+double dir_beta_applied_ = 1.0;
+uint8_t dir_reason_ = 0;                 // 0=inactive 1=translation_degen 2=matching_gate_blocked 3=imu_safety_limited
+bool dir_matching_gate_passed_ = true;
+double dir_translation_severity_ = 0.0;  // 1 - trans_ratio/threshold, clamp[0,1] (本帧 detected)
+Eigen::Matrix3d ht_cum_ = Eigen::Matrix3d::Zero();
+bool ht_cum_inited_ = false;
+
 struct ImuHealthSample
 {
   double t;
@@ -276,6 +323,8 @@ struct DegeneracyData
   Eigen::Vector3d weak_rotation_direction = Eigen::Vector3d::UnitZ();    // Hr 最小特征向量 (body 系)
   int weak_mode_index = 0;                // 最小特征值模态下标
   int dominant_weak_axis = 2;             // argmax(|weak_direction|) 状态维 0-5
+  // P4: 原始 Ht 矩阵 (供 Ht 时间累积 → 稳定弱方向; 检测器始终基于原始 h_x, 与 P4 控制器数据路径分离)
+  Eigen::Matrix3d Ht = Eigen::Matrix3d::Zero();
 };
 DegeneracyData degen_data;
 
@@ -303,6 +352,7 @@ void compute_geometric_hessian(const esekfom::dyn_share_datastruct<double> &ekfo
 
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_t(Ht);
   Eigen::Vector3d wt = es_t.eigenvalues(); // ascending
+  out.Ht = Ht;  // P4: 原始 Ht (检测器数据路径, 绝不被 P4 控制器修改)
   out.trans_ratio = (wt(2) > 1e-12) ? wt(0) / wt(2) : 0.0;
   out.normal_concentration = (wt.sum() > 1e-12) ? wt(2) / wt.sum() : 0.0;
 
@@ -570,6 +620,16 @@ void publish_lio_health()
   msg.final_scale = adaptive_final_scale_det_;
   msg.adaptive_active = adaptive_active_det_;
 
+  // ── P4 Directional Update (本帧 applied; severity/gate 本帧 detected) ──
+  msg.directional_active = dir_active_;
+  msg.beta_applied = dir_beta_applied_;
+  for (int i = 0; i < 3; i++)
+    msg.suppressed_weak_direction[i] = dir_cache_.valid
+      ? dir_cache_.weak_translation_direction(i) : degen_data.weak_translation_direction(i);
+  msg.directional_reason = dir_reason_;
+  msg.translation_severity = dir_translation_severity_;
+  msg.matching_gate_passed = dir_matching_gate_passed_;
+
   msg.pos_x = state_point.pos(0);
   msg.pos_y = state_point.pos(1);
   msg.pos_z = state_point.pos(2);
@@ -722,6 +782,137 @@ void apply_adaptive_lidar_cov()
     }
   }
   else adaptive_warn_since_ = 0.0;
+}
+
+/*** ==================== P4 helper (Attribution-aware Directional Update) ====================
+ * 数据路径分离 (R6/R7): 本组函数只读 degen_data (由 P1 compute_geometric_hessian 用原始
+ *   h_x 算出) 与 health IMU 缓冲; 不读、不写任何被 P4 esekfom projector 影响的状态。
+ * one-frame delay: update_directional_cache() 在 update 收敛后调用, compute_directional_trigger()
+ *   在下一次 update 前调用 → 本帧抑制方向来自上一帧检测, 无同帧自反馈 (R11)。
+ ***********************************************************************/
+
+// P2 is_matching_failure 布尔判定 (attribution_rules.classify, 冻结阈值, 独立 rolling baseline)。
+// 与 P3 adaptive matching channel 同源但走独立 buffer —— 保证 P4 不依赖 adaptive_enable 开关。
+bool compute_directional_matching_gate()
+{
+  const double eff_num = static_cast<double>(degen_data.effective_feature_num);
+  const double cand    = static_cast<double>(degen_data.candidate_feature_num);
+  double ratio = degen_data.effective_feature_ratio;
+  if (ratio <= 0.0 && eff_num > 0.0 && cand > 0.0)
+    ratio = eff_num / cand;
+  const double mean_res = degen_data.mean_residual;
+  const double res_p90  = degen_data.residual_p90;
+
+  // rolling baseline (30s 窗口中位数; 与 attribution_node 的 ratio_hist 一致)
+  const double now = lidar_end_time;
+  directional_base_buf_.push_back({now, ratio, eff_num});
+  while (!directional_base_buf_.empty() &&
+         now - directional_base_buf_.front().t > adaptive_ratio_base_window_s)
+    directional_base_buf_.pop_front();
+
+  double ratio_base = 0.0, num_base = 0.0;
+  const bool have_base = (directional_base_buf_.size() >= 5);
+  if (have_base)
+  {
+    std::vector<double> rv, nv;
+    rv.reserve(directional_base_buf_.size());
+    nv.reserve(directional_base_buf_.size());
+    for (const auto &s : directional_base_buf_) { rv.push_back(s.ratio); nv.push_back(s.num); }
+    const size_t mid = rv.size() / 2;
+    std::nth_element(rv.begin(), rv.begin() + static_cast<std::ptrdiff_t>(mid), rv.end());
+    std::nth_element(nv.begin(), nv.begin() + static_cast<std::ptrdiff_t>(mid), nv.end());
+    ratio_base = rv[mid];
+    num_base = nv[mid];
+  }
+
+  const bool low_ratio = ratio < adaptive_ratio_low_th;
+  const bool low_feats = eff_num < adaptive_feats_low_th;
+  const bool crit_feats = eff_num < adaptive_feats_crit_th;
+  const bool high_mean = mean_res > adaptive_res_high_th;
+  const bool high_p90 = res_p90 > adaptive_res_p90_th;
+
+  double rel_ratio = -1.0, rel_num = -1.0;
+  if (have_base && ratio_base > 1e-6) rel_ratio = ratio / ratio_base;
+  if (have_base && num_base > 1e-6)   rel_num   = eff_num / num_base;
+  const bool rel_drop = (rel_ratio >= 0.0 && rel_ratio < adaptive_ratio_drop_th) ||
+                        (rel_num   >= 0.0 && rel_num   < adaptive_num_drop_th);
+
+  // P2 冻结版 (attribution_rules.py:114): low_feats 独立触发, 不再要求同时 low_ratio/high_mean。
+  return low_feats || crit_feats || high_p90 || rel_drop || (low_ratio && high_mean);
+}
+
+// 每帧 IEKF update 收敛后调用: 用本帧 degen_data 填充 dir_cache_ (供下一帧 projector 使用)。
+void update_directional_cache()
+{
+  if (!directional_enable) { dir_cache_.valid = false; return; }
+  if (!degen_data.valid) return;
+
+  dir_cache_.valid = true;
+  dir_cache_.trans_ratio = degen_data.trans_ratio;
+  dir_cache_.matching_ok = !compute_directional_matching_gate();
+
+  // 弱方向: 可选 Ht 时间累积 (R12: 先累积 Ht 再特征分解, 避免 eigenvector sign ambiguity)。
+  //         独立开关 ht_accum_enable (R13: 不用 alpha=0 表示"关闭")。
+  if (directional_ht_accum_enable)
+  {
+    if (!ht_cum_inited_) { ht_cum_ = degen_data.Ht; ht_cum_inited_ = true; }
+    else
+      ht_cum_ = directional_ht_accum_alpha * degen_data.Ht
+              + (1.0 - directional_ht_accum_alpha) * ht_cum_;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(ht_cum_);
+    dir_cache_.weak_translation_direction = es.eigenvectors().col(0); // 升序最小特征向量
+  }
+  else
+  {
+    dir_cache_.weak_translation_direction = degen_data.weak_translation_direction;
+  }
+  const double nrm = dir_cache_.weak_translation_direction.norm();
+  if (nrm < 1e-6) { dir_cache_.weak_translation_direction = Eigen::Vector3d::UnitX(); }
+  else            { dir_cache_.weak_translation_direction /= nrm; }
+
+  // IMU 低激励 (P2: gyr_weak && acc_weak, 冻结阈值)。v1 只记录; imu_safety_limiter_enable
+  // 时在 trigger 里限制 beta 下限 (R17 接口预留)。
+  unsigned int imu_n = 0;
+  double grms[3] = {0.0}, gvar[3] = {0.0}, avar[3] = {0.0};
+  double gyr_exc = 0.0, acc_exc = 0.0;
+  compute_imu_excitation(imu_n, grms, gvar, avar, gyr_exc, acc_exc);
+  dir_cache_.imu_low_excitation = (gyr_exc < directional_gyr_exc_th)
+                               && (acc_exc < directional_acc_exc_th);
+}
+
+// 每帧 IEKF update 前调用: 判定本帧是否应用 directional projector, 输出 (w, beta)。
+// 触发 = translation 退化 (trans_ratio < threshold, 独立于 rotation, R14) && matching gate (R15/R16)。
+void compute_directional_trigger(double &out_beta, const Eigen::Vector3d *&out_w)
+{
+  out_beta = 1.0; out_w = nullptr;
+  dir_active_ = false; dir_reason_ = 0;
+  dir_translation_severity_ = 0.0;
+  if (!directional_enable || !dir_cache_.valid) return;
+
+  const double tr = dir_cache_.trans_ratio;
+  dir_translation_severity_ = (directional_ratio_t_th > 0.0)
+    ? std::min(1.0, std::max(0.0, 1.0 - tr / directional_ratio_t_th)) : 0.0;
+  dir_matching_gate_passed_ = dir_cache_.matching_ok;  // msg 始终反映本帧 detected gate
+
+  // R14: translation-only trigger (P1 全局 is_degenerate 受 rotation 影响, 这里不用)
+  if (tr >= directional_ratio_t_th) { dir_reason_ = 0; return; }
+
+  // R15/R16: matching gate —— correspondence 不可信时弱方向本身可能失真, 关闭 projector
+  if (!dir_cache_.matching_ok) { dir_reason_ = 2; return; }
+
+  // R17: IMU 低激励 safety limiter (v1 可选, 默认记录不联动)
+  double beta = directional_beta_t;
+  if (directional_imu_safety_limiter_enable && dir_cache_.imu_low_excitation)
+  {
+    beta = std::max(beta, directional_imu_beta_floor);
+    dir_reason_ = 3;
+  }
+  else dir_reason_ = 1;
+
+  out_w = &dir_cache_.weak_translation_direction;
+  out_beta = beta;
+  dir_beta_applied_ = beta;
+  dir_active_ = true;
 }
 
 void SigHandle(int sig)
@@ -1526,6 +1717,40 @@ public:
                 "(matching/geometry 信号来自 degeneracy 门控内的 degen_data)");
         }
 
+        // P4 directional 参数: 经 launch 参数 dict 传入 (唯一参数源, 同 P3 教训)。
+        // 默认全关 = 与 p3-final 数值等价 (esekfom projector 默认 identity)。
+        this->declare_parameter<bool>("directional.enable", directional_enable);
+        this->declare_parameter<double>("directional.beta_t", directional_beta_t);
+        this->declare_parameter<double>("directional.beta_r", directional_beta_r);
+        this->declare_parameter<bool>("directional.ht_accum_enable", directional_ht_accum_enable);
+        this->declare_parameter<double>("directional.ht_accum_alpha", directional_ht_accum_alpha);
+        this->declare_parameter<bool>("directional.imu_safety_limiter_enable",
+                                      directional_imu_safety_limiter_enable);
+        this->declare_parameter<double>("directional.imu_beta_floor", directional_imu_beta_floor);
+        this->get_parameter_or<bool>("directional.enable", directional_enable, false);
+        this->get_parameter_or<double>("directional.beta_t", directional_beta_t, 0.5);
+        this->get_parameter_or<double>("directional.beta_r", directional_beta_r, 1.0);
+        this->get_parameter_or<bool>("directional.ht_accum_enable",
+                                     directional_ht_accum_enable, false);
+        this->get_parameter_or<double>("directional.ht_accum_alpha",
+                                       directional_ht_accum_alpha, 0.5);
+        this->get_parameter_or<bool>("directional.imu_safety_limiter_enable",
+                                     directional_imu_safety_limiter_enable, false);
+        this->get_parameter_or<double>("directional.imu_beta_floor",
+                                       directional_imu_beta_floor, 0.5);
+        if (directional_enable && !degeneracy_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "directional.enable=true 但 degeneracy.enable=false: directional 不会生效 "
+                "(弱方向/ratio 信号来自 degeneracy 门控内的 degen_data)");
+        }
+        if (directional_enable && adaptive_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "P4 评审 R29: --adaptive 与 --directional 正式实验必须互斥; 当前同时开启, "
+                "结果将无法归因于单一机制");
+        }
+
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
@@ -1712,7 +1937,10 @@ private:
             degen_data.iter_count = 0;
             // P3: 用上一帧 detected final_scale 更新本帧 applied covariance (one-frame delay)
             apply_adaptive_lidar_cov();
-            kf.update_iterated_dyn_share_modified(lidar_meas_cov_, solve_H_time);
+            // P4: 本帧 directional projector 参数 (来自上一帧 update 后的 dir_cache_, one-frame delay)
+            const Eigen::Vector3d *dir_w = nullptr; double dir_beta = 1.0;
+            compute_directional_trigger(dir_beta, dir_w);
+            kf.update_iterated_dyn_share_modified(lidar_meas_cov_, solve_H_time, dir_w, dir_beta);
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1734,6 +1962,12 @@ private:
             if (degeneracy_enable && adaptive_enable)
             {
                 compute_adaptive_detected_scales();
+            }
+
+            /*** P4: 用本帧 degen_data 填充方向缓存 (供下一帧 projector, one-frame delay) ***/
+            if (degeneracy_enable && directional_enable)
+            {
+                update_directional_cache();
             }
 
             /*** Publish LIO health (P2, same timestamp as degen score) ***/

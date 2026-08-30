@@ -1616,7 +1616,16 @@ public:
 	}
 	
 	//iterated error state EKF update modified for one specific system.
-	void update_iterated_dyn_share_modified(double R, double &solve_time) {
+	//P4 (Attribution-aware Directional Update): 可选 directional projector。
+	//  dir_proj_w    : 世界系 weak translation direction (Ht 最小特征向量), nullptr = identity (默认, 零侵入)。
+	//  dir_proj_beta : 沿 dir_proj_w 的状态 correction 保留系数 [0,1]; 1.0 = 不抑制。
+	//  语义: dx_ 的 pos(世界系) 弱方向分量保留 beta 倍; 同时 K_x 的 pos 三行做相同投影,
+	//        使 covariance 更新 P = L_ - K_x*P_ 与 correction 一致 (不 overconfident)。
+	//  注意 (P4 评审 R10): dir_proj_w 必须是"当前帧线性化坐标系"下的方向。
+	//        平动方向为世界系可直接跨帧使用; 若未来做转动方向抑制, body 系方向
+	//        需先按两帧姿态变换 (R_prev->R_cur), 不能直接跨帧用。
+	void update_iterated_dyn_share_modified(double R, double &solve_time,
+		const Eigen::Vector3d *dir_proj_w = nullptr, double dir_proj_beta = 1.0) {
 		
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
@@ -1813,6 +1822,16 @@ public:
 
 			//K_x = K_ * h_x_;
 			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 
+			//P4 directional projection (state correction 层): pos(世界系) 沿弱方向分量保留 beta 倍。
+			//强方向分量数值不变; 因 Kalman gain/协方差耦合, 其他方向 correction 理论上有二阶影响,
+			//语义以"弱方向 correction 直接缩放"为准 (P4 评审 R1/R3/R8)。
+			if(dir_proj_w != nullptr && dir_proj_beta < 1.0)
+			{
+				Matrix<scalar_type, 3, 1> dp = dx_.template segment<3>(0);
+				const scalar_type c = dp.dot(*dir_proj_w);
+				dp -= (static_cast<scalar_type>(1.0) - dir_proj_beta) * c * (*dir_proj_w);
+				dx_.template segment<3>(0) = dp;
+			}
 			state x_before = x_;
 			x_.boxplus(dx_);
 			dyn_share.converge = true;
@@ -1921,7 +1940,20 @@ public:
 				// }
 				// else
 				//{
-					P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
+					//P4 covariance consistency: 与 correction 同步投影 K_x 的 pos 三行 (前 12 列),
+				//使 P = L_ - K_x*P_ 沿弱方向的信息压缩量同比例减小 —— 否则状态只收 beta 倍
+				//correction、协方差却按 100% 缩小 → overconfident (P4 评审 R4, sanity E3)。
+				if(dir_proj_w != nullptr && dir_proj_beta < 1.0)
+				{
+					for(int col = 0; col < 12; col++)
+					{
+						Matrix<scalar_type, 3, 1> r = K_x.template block<3, 1>(0, col);
+						const scalar_type c = r.dot(*dir_proj_w);
+						r -= (static_cast<scalar_type>(1.0) - dir_proj_beta) * c * (*dir_proj_w);
+						K_x.template block<3, 1>(0, col) = r;
+					}
+				}
+				P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
 				//}
 				solve_time += omp_get_wtime() - solve_start;
 				return;

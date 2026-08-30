@@ -67,6 +67,20 @@ float64 matching_scale      # detected: 本帧匹配路 scale (1 = 不放大, ag
 float64 final_scale         # detected: max(geometry_scale, matching_scale) (EMA 前)
 bool   adaptive_active      # detected: final_scale > 1 + 1e-6
 
+# ── P4 Attribution-aware Directional Update ──
+# 时间语义 (one-frame delayed, 见 report/P4):
+#   directional_active / beta_applied / suppressed_weak_direction = 本帧 IEKF 实际生效值
+#     (trigger 用上一帧 update 后的 dir_cache_ 判定);
+#   translation_severity / matching_gate_passed = 本帧 detected (本帧 degen_data / gate 结果)。
+# directional_reason 枚举: 0=inactive 1=translation_degen 2=matching_gate_blocked
+#   3=imu_safety_limited。事后归因: 变差时区分"方向判错/抑制过强/gate 没挡住/IMU fallback"。
+bool   directional_active              # 本帧是否应用方向性投影
+float64 beta_applied                   # 实际生效的弱方向保留系数 (1 = 不抑制)
+float64[3] suppressed_weak_direction   # 本帧使用的弱方向 (世界系, Ht 最小特征向量, 归一化)
+uint8  directional_reason              # 见上枚举
+float64 translation_severity           # detected: 1 - trans_ratio/threshold, clamp[0,1]
+bool   matching_gate_passed            # detected: 本帧 P2 is_matching_failure == false
+
 # ── 便于日志/回放对齐 ──
 float64 pos_x
 float64 pos_y
