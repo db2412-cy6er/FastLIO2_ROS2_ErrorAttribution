@@ -1624,8 +1624,20 @@ public:
 	//  注意 (P4 评审 R10): dir_proj_w 必须是"当前帧线性化坐标系"下的方向。
 	//        平动方向为世界系可直接跨帧使用; 若未来做转动方向抑制, body 系方向
 	//        需先按两帧姿态变换 (R_prev->R_cur), 不能直接跨帧用。
+	//  ---- P5: current-frame measurement gate (评审 R1-R3) ----
+	//  first_iter_gate_cb : 第一次 h_dyn_share() 返回后调用 (完成 KD-tree correspondence,
+	//       degen_data 已填充 first-iteration 统计)。返回 true = 拒绝本帧 measurement。
+	//       nullptr (默认) = 关闭, 走原始路径 (零侵入)。
+	//  gate_ctx           : callback 上下文 (void*, 保持 IKFoM 与上层逻辑解耦)。
+	//  measurement_rejected: out-param, 被拒绝时置 true (供 laserMapping 跳过 map 插入)。
+	//  拒绝语义 (评审 R2/R3): 显式恢复 x_/P_ 到 x_propagated/P_propagated 后 return,
+	//       不再执行任何 measurement-related covariance 收尾 (循环体外无收尾代码,
+	//       但显式 restore 使语义在任何迭代点都自洽, 不依赖"恰好在第一次迭代 break"的
+	//       脆弱位置约束)。
 	void update_iterated_dyn_share_modified(double R, double &solve_time,
-		const Eigen::Vector3d *dir_proj_w = nullptr, double dir_proj_beta = 1.0) {
+		const Eigen::Vector3d *dir_proj_w = nullptr, double dir_proj_beta = 1.0,
+		bool (*first_iter_gate_cb)(void*) = nullptr, void *gate_ctx = nullptr,
+		bool *measurement_rejected = nullptr) {
 		
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
@@ -1647,6 +1659,19 @@ public:
 			if(! dyn_share.valid)
 			{
 				continue; 
+			}
+
+			// P5: current-frame measurement gate —— 仅第一次迭代 (i==-1) 检查。
+			// 此时 degen_data (由 h_share_model 在 h_dyn_share 内填充) 是 first-iteration
+			// 统计 (IMU propagated pose 下完成 KD-tree correspondence); P2 阈值是在
+			// final-iteration 标定的, 不能复用 (P5.0 已验证), 上层 callback 必须用
+			// relative-drop 通道 (P5.0 决策)。
+			if (i == -1 && first_iter_gate_cb != nullptr && first_iter_gate_cb(gate_ctx))
+			{
+				x_ = x_propagated;          // 显式恢复 = "只有 IMU propagation, 无 LiDAR correction"
+				P_ = P_propagated;
+				if (measurement_rejected != nullptr) *measurement_rejected = true;
+				return;                       // 直接退出整个 update, 无任何 measurement 收尾
 			}
 
 			//Matrix<scalar_type, Eigen::Dynamic, 1> h = h_dyn_share(x_, dyn_share);

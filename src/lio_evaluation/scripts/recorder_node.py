@@ -100,6 +100,8 @@ class RecorderNode(Node):
             w.writerow([
                 "timestamp", "iteration", "frame_index",
                 "total_residual", "mean_residual", "effective_feature_num",
+                # P5.0: first-iteration matching 统计 (iteration==1 行 = current-frame gate 信号)
+                "candidate_feature_num", "effective_feature_ratio", "residual_p90",
                 "trans_ratio", "rot_ratio", "lambda_max", "lambda_min",
             ])
             self._iter_handle = (f, w)
@@ -139,6 +141,9 @@ class RecorderNode(Node):
                 "directional_active", "beta_applied",
                 "swd0", "swd1", "swd2",          # suppressed_weak_direction (世界系)
                 "directional_reason", "translation_severity", "matching_gate_passed",
+                # P5 current-frame gate (本帧 first-iteration 判定)
+                "measurement_rejected", "matching_severity_current",
+                "consecutive_reject_count", "recovery_state", "map_update_skipped",
                 "pos_x", "pos_y", "pos_z",
             ])
             self._health_handle = (f, w)
@@ -206,6 +211,8 @@ class RecorderNode(Node):
         w.writerow([
             f"{t:.9f}", msg.iteration, msg.frame_index,
             f"{msg.total_residual:.6f}", f"{msg.mean_residual:.6f}", msg.effective_feature_num,
+            msg.candidate_feature_num, f"{msg.effective_feature_ratio:.6f}",
+            f"{msg.residual_p90:.6f}",
             f"{msg.trans_ratio:.6f}", f"{msg.rot_ratio:.6f}",
             f"{msg.lambda_max:.6e}", f"{msg.lambda_min:.6e}",
         ])
@@ -246,6 +253,9 @@ class RecorderNode(Node):
             *[f"{v:.6f}" for v in msg.suppressed_weak_direction],
             msg.directional_reason, f"{msg.translation_severity:.6f}",
             int(msg.matching_gate_passed),
+            int(msg.measurement_rejected), f"{msg.matching_severity_current:.6f}",
+            msg.consecutive_reject_count, msg.recovery_state,
+            int(msg.map_update_skipped),
             f"{msg.pos_x:.6f}", f"{msg.pos_y:.6f}", f"{msg.pos_z:.6f}",
         ])
         f.flush()

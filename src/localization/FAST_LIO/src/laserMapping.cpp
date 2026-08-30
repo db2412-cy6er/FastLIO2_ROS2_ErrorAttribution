@@ -328,6 +328,176 @@ struct DegeneracyData
 };
 DegeneracyData degen_data;
 
+/*** ==================== P5 Current-frame Measurement Gate ====================
+ * 机制 (评审 R1-R3/R6-R9): 在 esekfom::update_iterated_dyn_share_modified 第一次
+ *   h_dyn_share() 返回后 (KD-tree correspondence 完成, degen_data 已填充
+ *   first-iteration 统计), 由 callback 判定本帧 LiDAR measurement 是否可信:
+ *     - 可信  → 正常执行 IEKF measurement correction;
+ *     - 不可信 → 显式恢复 propagated state/P (esekfom 内完成), 本帧只有 IMU
+ *               propagation; laserMapping 侧同时跳过 map_incremental() (评审 R6/R7:
+ *               拒绝帧的预测位姿点云不得污染 ikd-Tree, 否则下一帧在污染地图上匹配)。
+ * 判定通道 (P5.0 冻结): P2 final-iteration 的 absolute 阈值 (feats_low/residual)
+ *   在 first-iteration 上不可用 (normal_indoor 干净场景 p90 也超阈值; fault 段
+ *   first-iter residual 反而低)。P5 gate 使用 rolling-baseline relative 通道:
+ *     reject = (rel_num < num_drop_th) OR (rel_ratio < ratio_drop_th)
+ *              OR (rel_p90 > p90_rise_th)      # residual_p90 相对基线飙升
+ *   geometry 防护 (评审 #13): 不单独用点数绝对阈值; single_plane 的 rel_num/rel_ratio
+ *   均稳定 (P5.0 验证 0 触发), 天然不误杀 geometry 退化。
+ * Recovery state machine (评审 #8-#12): NORMAL → REJECT_ONCE → DEGRADED(2帧) →
+ *   RECOVERY_REQUIRED(5帧); 每帧始终重新尝试 matching (不降门槛), 恢复用 hysteresis
+ *   (recover 阈值放宽 + 连续确认帧), 拒绝≠停止匹配。
+ * 参数来源: 仅 mapping.launch.py launch dict; 默认全关 = 零侵入。
+ ***********************************************************************/
+bool   robust_gate_enable = false;
+double gate_num_drop_th = 0.40;    // rel_num 低于此 → 有效特征数骤降 (P2 v1.1 冻结值)
+double gate_ratio_drop_th = 0.30;  // rel_ratio 低于此 → 有效占比骤降 (P2 v1.1 冻结值)
+double gate_p90_rise_th = 2.0;     // residual_p90 相对基线 > 此倍数 → 残差突变 (P5.0)
+double gate_base_window_s = 30.0;  // rolling baseline 窗口 (s, P2 v1.1 冻结)
+double gate_recover_num_th = 0.55; // hysteresis: recover 用更宽松的 rel_num 阈值
+double gate_recover_ratio_th = 0.45;// hysteresis: recover rel_ratio 阈值
+double gate_recover_p90_th = 1.5;  // hysteresis: recover p90 相对倍数
+int    gate_degraded_after = 2;    // 连续拒绝 ≥2 → DEGRADED
+int    gate_recovery_required_after = 5;  // 连续拒绝 ≥5 → RECOVERY_REQUIRED
+int    gate_recover_confirm_frames = 2;   // 恢复需连续满足的帧数
+
+// P5 recovery state machine (发布语义, 0=NORMAL 1=REJECT_ONCE 2=DEGRADED 3=RECOVERY_REQUIRED)
+enum class P5GateState : uint8_t { NORMAL = 0, REJECT_ONCE = 1, DEGRADED = 2, RECOVERY_REQUIRED = 3 };
+P5GateState gate_state_ = P5GateState::NORMAL;
+int   gate_consecutive_reject_ = 0;    // 内部 int (saturation 到 INT_MAX, 防溢出回 0)
+int   gate_recover_confirm_count_ = 0; // 连续满足 recover 条件的帧数
+bool  gate_rejected_ = false;          // 本帧 rejected (out-param 回报主循环)
+bool  gate_map_update_skipped_ = false;// 本帧是否跳过 map insertion
+bool  gate_recovery_allow_map_ = false;// RECOVERY_REQUIRED 时允许传播位姿插图 (防地图冻结)
+double gate_matching_severity_current_ = 0.0;  // 本帧 first-iter relative severity
+double gate_rel_num_ = 1.0, gate_rel_ratio_ = 1.0, gate_rel_p90_ = 1.0;
+std::deque<AdaptiveBaselineSample> gate_base_buf_;  // 独立 buffer (与 P3/P4 数据路径分离)
+bool  gate_baseline_inited_ = false;
+double gate_base_median_ratio_ = 1.0, gate_base_median_num_ = 1.0, gate_base_median_p90_ = 0.0;
+
+
+
+// P5 gate 判定: 基于当前帧 first-iteration 统计 + rolling baseline。
+// 返回值 true = reject (拒绝本帧 measurement)。
+static bool robust_gate_reject_check()
+{
+  // 读 degen_data (当前 = first-iteration, 因 callback 在第一次 h_dyn_share 后调用)
+  const double eff = static_cast<double>(degen_data.effective_feature_num);
+  const double cand = static_cast<double>(degen_data.candidate_feature_num);
+  const double ratio = (cand > 0) ? eff / cand : (eff > 0 ? 1.0 : 0.0);
+  const double p90 = degen_data.residual_p90;
+
+  const double now_t = lidar_end_time;
+  // 滚动清理 (窗口 gate_base_window_s)
+  while (!gate_base_buf_.empty() && now_t - gate_base_buf_.front().t > gate_base_window_s)
+    gate_base_buf_.pop_front();
+
+  // 当前帧 relative 信号 (相对 baseline median; baseline 未初始化时用当前帧自身 = no reject)
+  double rel_num = 1.0, rel_ratio = 1.0, rel_p90 = 1.0;
+  if (gate_baseline_inited_)
+  {
+    rel_num = (gate_base_median_num_ > 1e-6) ? eff / gate_base_median_num_ : 1.0;
+    rel_ratio = (gate_base_median_ratio_ > 1e-6) ? ratio / gate_base_median_ratio_ : 1.0;
+    rel_p90 = (gate_base_median_p90_ > 1e-9) ? p90 / gate_base_median_p90_ : 1.0;
+  }
+  gate_rel_num_ = rel_num; gate_rel_ratio_ = rel_ratio; gate_rel_p90_ = rel_p90;
+
+  // reject 判定 (P5.0: relative 通道 + 残差确认; 不设 absolute 点数阈值 → single_plane 不误杀)
+  // 评审 #13 (关键修正): "特征少但残差正常"不是 matching failure (dropout 保留的 20%
+  // 点残差仍正常, 可提供有效 correction; 单靠 rel_num 拒绝会不必要地丢帧导致漂移)。
+  // 因此数量/占比骤降必须与残差异常 AND 组合才 reject —— 只有"点少且残差差"(outlier/
+  // noise 型) 才拒绝。p90 通道同样要求与数量/占比骤降 AND (clean 场景 p90 相对波动
+  // 天然存在, parity check 实测单独 p90 会误报)。
+  const bool reject_by_num = rel_num < gate_num_drop_th;
+  const bool reject_by_ratio = rel_ratio < gate_ratio_drop_th;
+  const bool res_abnormal = rel_p90 > gate_p90_rise_th
+                         || (p90 > 1e-6 && degen_data.mean_residual > 0.02);
+  const bool reject = (reject_by_num || reject_by_ratio) && res_abnormal;
+
+  // severity (relative 口径, 0~1): 取各通道 margin 的 max
+  double sev = 0.0;
+  if (rel_num < 1.0)   sev = std::max(sev, std::min(1.0, (1.0 - rel_num) / (1.0 - gate_num_drop_th)));
+  if (rel_ratio < 1.0) sev = std::max(sev, std::min(1.0, (1.0 - rel_ratio) / (1.0 - gate_ratio_drop_th)));
+  if (rel_p90 > 1.0)   sev = std::max(sev, std::min(1.0, (rel_p90 - 1.0) / (gate_p90_rise_th - 1.0)));
+  gate_matching_severity_current_ = std::min(1.0, std::max(0.0, sev));
+
+  // 更新 rolling baseline (只用非 reject 帧, 防长 fault 段基线污染; P2 v1.1 同语义)。
+  // 注: 曾尝试 "非 reject 且残差不异常" (评审 #13 防 fault 帧污染 median), 但实测
+  //   V5 上使 gate 更敏感 → 拒绝更多可用帧 → 漂移 → ATE 从 2.16m 恶化到 10.46m。
+  //   权衡后恢复只用非 reject 帧: fault 帧进入 baseline 虽有污染, 但"接受可用帧
+  //   保持位姿"比"过早拒绝导致漂移"更重要 (与评审 #9 语义一致: 拒绝越少越好)。
+  if (!reject)
+  {
+    gate_base_buf_.push_back({now_t, ratio, eff});
+    std::vector<double> rs, ns;
+    for (const auto &s : gate_base_buf_) { rs.push_back(s.ratio); ns.push_back(s.num); }
+    if (!rs.empty())
+    {
+      std::sort(rs.begin(), rs.end()); std::sort(ns.begin(), ns.end());
+      gate_base_median_ratio_ = rs[rs.size() / 2];
+      gate_base_median_num_ = ns[ns.size() / 2];
+      gate_baseline_inited_ = true;
+    }
+    // p90 baseline: 独立 deque (pair<t,p90>)
+    static std::deque<std::pair<double, double>> p90_base;
+    p90_base.push_back({now_t, p90});
+    while (!p90_base.empty() && now_t - p90_base.front().first > gate_base_window_s)
+      p90_base.pop_front();
+    std::vector<double> pv;
+    for (const auto &s : p90_base) pv.push_back(s.second);
+    if (!pv.empty()) { std::sort(pv.begin(), pv.end()); gate_base_median_p90_ = pv[pv.size() / 2]; }
+  }
+  return reject;
+}
+
+// P5 gate callback (esekfom 调用, void* ctx 解耦): 更新 state machine 并返回是否拒绝。
+static bool robust_gate_callback(void * /*ctx*/)
+{
+  const bool reject = robust_gate_reject_check();
+  gate_rejected_ = reject;
+
+  if (reject)
+  {
+    gate_consecutive_reject_ = std::min(gate_consecutive_reject_ + 1, INT_MAX);
+    gate_recover_confirm_count_ = 0;
+    // 状态转移: 0→REJECT_ONCE, ≥2→DEGRADED, ≥5→RECOVERY_REQUIRED
+    if (gate_consecutive_reject_ >= gate_recovery_required_after)
+    {
+      gate_state_ = P5GateState::RECOVERY_REQUIRED;
+      // 评审 #6/#7 + 长 fault 边界 (评审 #10) 的折中:
+      //   - 短 fault (REJECT_ONCE/DEGRADED): 拒绝帧不插图, 防污染 (用户 #7 核心诉求);
+      //   - RECOVERY_REQUIRED (连续≥5帧): 地图若不更新会"冻结"→ 机器人移动后旧地图
+      //     完全失配 → 永远无法恢复 → 纯 IMU 漂移 (实测 V5 165m)。此时允许用传播
+      //     位姿插图让地图跟上 (IMU 短时漂移小, 通常 <0.5m/5s), 给下一帧恢复机会。
+      gate_recovery_allow_map_ = true;
+    }
+    else
+    {
+      gate_state_ = (gate_consecutive_reject_ >= gate_degraded_after)
+                  ? P5GateState::DEGRADED : P5GateState::REJECT_ONCE;
+      gate_recovery_allow_map_ = false;
+    }
+  }
+  else
+  {
+    gate_recovery_allow_map_ = false;
+    // 恢复判定 (hysteresis: 更宽松阈值 + 连续确认帧; 评审 #12)
+    const bool ok_num = gate_rel_num_ > gate_recover_num_th;
+    const bool ok_ratio = gate_rel_ratio_ > gate_recover_ratio_th;
+    const bool ok_p90 = gate_rel_p90_ < gate_recover_p90_th;
+    if (ok_num && ok_ratio && ok_p90)
+    {
+      if (++gate_recover_confirm_count_ >= gate_recover_confirm_frames)
+      {
+        gate_consecutive_reject_ = 0;
+        gate_state_ = P5GateState::NORMAL;
+        gate_recover_confirm_count_ = 0;
+      }
+    }
+    else gate_recover_confirm_count_ = 0;
+  }
+  return reject;
+}
+
 void compute_geometric_hessian(const esekfom::dyn_share_datastruct<double> &ekfom_data, DegeneracyData &out)
 {
   const int m = static_cast<int>(ekfom_data.h_x.rows());
@@ -414,6 +584,9 @@ void publish_degeneracy_iteration()
   msg.total_residual = total_residual;
   msg.mean_residual = degen_data.mean_residual;
   msg.effective_feature_num = degen_data.effective_feature_num;
+  msg.candidate_feature_num = degen_data.candidate_feature_num;
+  msg.effective_feature_ratio = degen_data.effective_feature_ratio;
+  msg.residual_p90 = degen_data.residual_p90;
   msg.trans_ratio = degen_data.trans_ratio;
   msg.rot_ratio = degen_data.rot_ratio;
   msg.lambda_max = degen_data.eigenvalues6(5);
@@ -629,6 +802,14 @@ void publish_lio_health()
   msg.directional_reason = dir_reason_;
   msg.translation_severity = dir_translation_severity_;
   msg.matching_gate_passed = dir_matching_gate_passed_;
+
+  // ── P5 Current-frame Measurement Gate (本帧 first-iteration 判定) ──
+  msg.measurement_rejected = gate_rejected_;
+  msg.matching_severity_current = gate_matching_severity_current_;
+  msg.consecutive_reject_count = static_cast<uint16_t>(
+      std::min(gate_consecutive_reject_, static_cast<int>(UINT16_MAX)));
+  msg.recovery_state = static_cast<uint8_t>(gate_state_);
+  msg.map_update_skipped = gate_map_update_skipped_;
 
   msg.pos_x = state_point.pos(0);
   msg.pos_y = state_point.pos(1);
@@ -1751,6 +1932,51 @@ public:
                 "结果将无法归因于单一机制");
         }
 
+        // P5 robust gate 参数: 经 launch 参数 dict 传入 (唯一参数源, 同 P3/P4 教训)。
+        // 默认全关 = 与 p4-final 数值等价 (esekfom callback 默认 nullptr)。
+        this->declare_parameter<bool>("robust_gate.enable", robust_gate_enable);
+        this->declare_parameter<double>("robust_gate.num_drop_th", gate_num_drop_th);
+        this->declare_parameter<double>("robust_gate.ratio_drop_th", gate_ratio_drop_th);
+        this->declare_parameter<double>("robust_gate.p90_rise_th", gate_p90_rise_th);
+        this->declare_parameter<double>("robust_gate.base_window_s", gate_base_window_s);
+        this->declare_parameter<double>("robust_gate.recover_num_th", gate_recover_num_th);
+        this->declare_parameter<double>("robust_gate.recover_ratio_th", gate_recover_ratio_th);
+        this->declare_parameter<double>("robust_gate.recover_p90_th", gate_recover_p90_th);
+        this->declare_parameter<int>("robust_gate.degraded_after", gate_degraded_after);
+        this->declare_parameter<int>("robust_gate.recovery_required_after",
+                                     gate_recovery_required_after);
+        this->declare_parameter<int>("robust_gate.recover_confirm_frames",
+                                     gate_recover_confirm_frames);
+        this->get_parameter_or<bool>("robust_gate.enable", robust_gate_enable, false);
+        this->get_parameter_or<double>("robust_gate.num_drop_th", gate_num_drop_th, 0.40);
+        this->get_parameter_or<double>("robust_gate.ratio_drop_th", gate_ratio_drop_th, 0.30);
+        this->get_parameter_or<double>("robust_gate.p90_rise_th", gate_p90_rise_th, 2.0);
+        this->get_parameter_or<double>("robust_gate.base_window_s", gate_base_window_s, 30.0);
+        this->get_parameter_or<double>("robust_gate.recover_num_th", gate_recover_num_th, 0.55);
+        this->get_parameter_or<double>("robust_gate.recover_ratio_th", gate_recover_ratio_th, 0.45);
+        this->get_parameter_or<double>("robust_gate.recover_p90_th", gate_recover_p90_th, 1.5);
+        this->get_parameter_or<int>("robust_gate.degraded_after", gate_degraded_after, 2);
+        this->get_parameter_or<int>("robust_gate.recovery_required_after",
+                                    gate_recovery_required_after, 5);
+        this->get_parameter_or<int>("robust_gate.recover_confirm_frames",
+                                    gate_recover_confirm_frames, 2);
+        if (robust_gate_enable && !degeneracy_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "robust_gate.enable=true 但 degeneracy.enable=false: gate 不会生效 "
+                "(matching 信号来自 degeneracy 门控内的 degen_data)");
+        }
+        if (robust_gate_enable && adaptive_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "P5: robust_gate 与 adaptive 正式实验必须互斥; 当前同时开启, 结果将无法归因");
+        }
+        if (robust_gate_enable && directional_enable)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                "P5: robust_gate 与 directional 正式实验必须互斥; 当前同时开启, 结果将无法归因");
+        }
+
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
         path.header.stamp = this->get_clock()->now();
@@ -1935,12 +2161,25 @@ private:
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             degen_data.iter_count = 0;
+            // P5: 本帧 gate 状态重置 (callback 在 esekfom 第一次 h_dyn_share 后判定)
+            gate_rejected_ = false;
+            gate_map_update_skipped_ = false;
             // P3: 用上一帧 detected final_scale 更新本帧 applied covariance (one-frame delay)
             apply_adaptive_lidar_cov();
             // P4: 本帧 directional projector 参数 (来自上一帧 update 后的 dir_cache_, one-frame delay)
             const Eigen::Vector3d *dir_w = nullptr; double dir_beta = 1.0;
             compute_directional_trigger(dir_beta, dir_w);
-            kf.update_iterated_dyn_share_modified(lidar_meas_cov_, solve_H_time, dir_w, dir_beta);
+            // P5: 传入 current-frame gate callback (默认 nullptr = 关闭, 零侵入)。
+            // 拒绝时 esekfom 显式恢复 propagated state/P 并置 measurement_rejected=true。
+            bool meas_rejected = false;
+            kf.update_iterated_dyn_share_modified(lidar_meas_cov_, solve_H_time, dir_w, dir_beta,
+                                                  robust_gate_enable ? robust_gate_callback : nullptr,
+                                                  nullptr, &meas_rejected);
+            gate_rejected_ = meas_rejected;
+            // P5: map 门控标记立即设置 (publish_lio_health 需要它在 publish 时已就绪)。
+            //   拒绝帧默认不插图 (防污染, 评审 R6/R7); RECOVERY_REQUIRED 时允许传播位姿
+            //   插图 (gate_recovery_allow_map_, 防地图冻结导致的永久失配)。
+            gate_map_update_skipped_ = meas_rejected && !gate_recovery_allow_map_;
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1979,9 +2218,17 @@ private:
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
 
-            /*** add the feature points to map kdtree ***/
+            /*** add the feature points to map kdtree ***
+             * P5 (评审 R6/R7): 被拒绝的 LiDAR 帧不得插入地图 —— 该帧位姿只是 IMU
+             * 传播预测, 点云在该位姿下可能与真实几何错位, 插图会污染 ikd-Tree,
+             * 使下一帧在污染地图上匹配。拒绝帧仍发布 odometry/点云 (调试用),
+             * 但跳过 map_incremental()。map_update_skipped 与 measurement_rejected
+             * 保持一致, 供事后验证污染防护生效。 ***/
             t3 = omp_get_wtime();
-            map_incremental();
+            if (!gate_map_update_skipped_)
+            {
+                map_incremental();
+            }
             t5 = omp_get_wtime();
             
             /******* Publish points *******/

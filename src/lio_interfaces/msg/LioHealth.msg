@@ -81,6 +81,18 @@ uint8  directional_reason              # 见上枚举
 float64 translation_severity           # detected: 1 - trans_ratio/threshold, clamp[0,1]
 bool   matching_gate_passed            # detected: 本帧 P2 is_matching_failure == false
 
+# ── P5 Current-frame Measurement Gate (current-frame, 无 one-frame delay) ──
+# 时间语义 (见 report/P5): 全部为本帧 first-iteration 判定结果 (esekfom 第一次
+#   h_dyn_share() 后即时决定, 无上一帧滞后)。
+# measurement_rejected = true 时本帧只有 IMU propagation (x/P 显式恢复为 propagated),
+#   且 map insertion 被跳过 (map_update_skipped 应与它一致, 用于事后验证污染防护)。
+# recovery_state 枚举: 0=NORMAL 1=REJECT_ONCE 2=DEGRADED 3=RECOVERY_REQUIRED
+bool   measurement_rejected            # 本帧 LiDAR measurement 是否被拒绝
+float64 matching_severity_current      # 本帧 first-iter relative matching severity (0~1)
+uint16 consecutive_reject_count        # 连续拒绝帧数 (saturating, 上限 65535)
+uint8  recovery_state                  # 见上枚举 (NORMAL/REJECT_ONCE/DEGRADED/RECOVERY_REQUIRED)
+bool   map_update_skipped              # 本帧是否跳过 ikd-Tree 地图插入 (= rejected 时 true)
+
 # ── 便于日志/回放对齐 ──
 float64 pos_x
 float64 pos_y

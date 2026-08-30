@@ -25,6 +25,9 @@ def generate_launch_description():
     # 的解析缺陷; 与 use_sim_time 同机制)。默认 false = 零侵入。
     health_enable = LaunchConfiguration('health_enable')
     health_imu_window_sec = LaunchConfiguration('health_imu_window_sec')
+    # P5.0: degeneracy.debug_iterations 暴露 (P5.0 first-iteration 统计采集用;
+    # 默认 false = 零侵入, 与 mid360.yaml 默认一致)。
+    degeneracy_debug_iterations = LaunchConfiguration('degeneracy_debug_iterations')
     # P3: adaptive LiDAR weighting 参数 (唯一参数源, 不写 mid360.yaml; 默认全关 = 零侵入)。
     adaptive_enable = LaunchConfiguration('adaptive_enable')
     adaptive_max_geom_scale = LaunchConfiguration('adaptive_max_geom_scale')
@@ -41,6 +44,13 @@ def generate_launch_description():
     directional_ht_accum_alpha = LaunchConfiguration('directional_ht_accum_alpha')
     directional_imu_safety_limiter_enable = LaunchConfiguration('directional_imu_safety_limiter_enable')
     directional_imu_beta_floor = LaunchConfiguration('directional_imu_beta_floor')
+    # P5: current-frame robust measurement gate 参数 (唯一参数源, 默认全关 = 零侵入)。
+    robust_gate_enable = LaunchConfiguration('robust_gate_enable')
+    robust_gate_num_drop_th = LaunchConfiguration('robust_gate_num_drop_th')
+    robust_gate_ratio_drop_th = LaunchConfiguration('robust_gate_ratio_drop_th')
+    robust_gate_p90_rise_th = LaunchConfiguration('robust_gate_p90_rise_th')
+    robust_gate_recover_num_th = LaunchConfiguration('robust_gate_recover_num_th')
+    robust_gate_recover_ratio_th = LaunchConfiguration('robust_gate_recover_ratio_th')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
@@ -53,6 +63,10 @@ def generate_launch_description():
     declare_health_window_cmd = DeclareLaunchArgument(
         'health_imu_window_sec', default_value='0.5',
         description='P2: rolling IMU excitation 统计窗口 (s)'
+    )
+    declare_degen_debug_iter_cmd = DeclareLaunchArgument(
+        'degeneracy_debug_iterations', default_value='false',
+        description='P5.0: 发布 /lio/degeneracy_iterations (IEKF 每迭代观测, first-iteration 统计采集)'
     )
     declare_adaptive_enable_cmd = DeclareLaunchArgument(
         'adaptive_enable', default_value='false',
@@ -111,6 +125,30 @@ def generate_launch_description():
         'directional_imu_beta_floor', default_value='0.5',
         description='P4: IMU 低激励时的 beta 下限'
     )
+    declare_robust_gate_enable_cmd = DeclareLaunchArgument(
+        'robust_gate_enable', default_value='false',
+        description='P5: 当前帧鲁棒测量拒绝 (current-frame matching gate; 须 degeneracy.enable=true)'
+    )
+    declare_robust_gate_num_cmd = DeclareLaunchArgument(
+        'robust_gate_num_drop_th', default_value='0.40',
+        description='P5: 有效特征数相对滚动基线骤降阈值 (rel_num < 此值 → reject)'
+    )
+    declare_robust_gate_ratio_cmd = DeclareLaunchArgument(
+        'robust_gate_ratio_drop_th', default_value='0.30',
+        description='P5: 有效占比相对滚动基线骤降阈值 (rel_ratio < 此值 → reject)'
+    )
+    declare_robust_gate_p90_cmd = DeclareLaunchArgument(
+        'robust_gate_p90_rise_th', default_value='2.0',
+        description='P5: residual_p90 相对滚动基线飙升倍数阈值 (> 此值 → reject)'
+    )
+    declare_robust_gate_rec_num_cmd = DeclareLaunchArgument(
+        'robust_gate_recover_num_th', default_value='0.55',
+        description='P5: 恢复判定 rel_num 阈值 (hysteresis, 比 reject 宽松)'
+    )
+    declare_robust_gate_rec_ratio_cmd = DeclareLaunchArgument(
+        'robust_gate_recover_ratio_th', default_value='0.45',
+        description='P5: 恢复判定 rel_ratio 阈值 (hysteresis)'
+    )
     declare_config_path_cmd = DeclareLaunchArgument(
         'config_path', default_value=default_config_path,
         description='Yaml config file path'
@@ -135,6 +173,7 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time,
                      'health.enable': health_enable,
                      'health.imu_window_sec': health_imu_window_sec,
+                     'degeneracy.debug_iterations': degeneracy_debug_iterations,
                      'adaptive.enable': adaptive_enable,
                      'adaptive.max_geom_scale': adaptive_max_geom_scale,
                      'adaptive.max_match_scale': adaptive_max_match_scale,
@@ -148,7 +187,13 @@ def generate_launch_description():
                      'directional.ht_accum_enable': directional_ht_accum_enable,
                      'directional.ht_accum_alpha': directional_ht_accum_alpha,
                      'directional.imu_safety_limiter_enable': directional_imu_safety_limiter_enable,
-                     'directional.imu_beta_floor': directional_imu_beta_floor}],
+                     'directional.imu_beta_floor': directional_imu_beta_floor,
+                     'robust_gate.enable': robust_gate_enable,
+                     'robust_gate.num_drop_th': robust_gate_num_drop_th,
+                     'robust_gate.ratio_drop_th': robust_gate_ratio_drop_th,
+                     'robust_gate.p90_rise_th': robust_gate_p90_rise_th,
+                     'robust_gate.recover_num_th': robust_gate_recover_num_th,
+                     'robust_gate.recover_ratio_th': robust_gate_recover_ratio_th}],
         output='screen'
     )
     rviz_node = Node(
@@ -166,6 +211,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_path_cmd)
     ld.add_action(declare_health_enable_cmd)
     ld.add_action(declare_health_window_cmd)
+    ld.add_action(declare_degen_debug_iter_cmd)
     ld.add_action(declare_adaptive_enable_cmd)
     ld.add_action(declare_adaptive_geom_cmd)
     ld.add_action(declare_adaptive_match_cmd)
@@ -180,6 +226,12 @@ def generate_launch_description():
     ld.add_action(declare_directional_ht_accum_alpha_cmd)
     ld.add_action(declare_directional_imu_safety_cmd)
     ld.add_action(declare_directional_imu_floor_cmd)
+    ld.add_action(declare_robust_gate_enable_cmd)
+    ld.add_action(declare_robust_gate_num_cmd)
+    ld.add_action(declare_robust_gate_ratio_cmd)
+    ld.add_action(declare_robust_gate_p90_cmd)
+    ld.add_action(declare_robust_gate_rec_num_cmd)
+    ld.add_action(declare_robust_gate_rec_ratio_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(rviz_node)

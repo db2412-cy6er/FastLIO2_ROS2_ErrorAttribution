@@ -58,6 +58,9 @@ install(PROGRAMS scripts/parity_check.py
   DESTINATION lib/${PROJECT_NAME} RENAME parity_check)
 install(PROGRAMS scripts/p3_ab_compare.py
   DESTINATION lib/${PROJECT_NAME} RENAME p3_ab_compare)
+# ---- P5 (P5.0 first-iteration 分布分析; 其余 p5_*.py 走 src 直跑, 同 P4 惯例) ----
+install(PROGRAMS scripts/p5_analyze_first_iter.py
+  DESTINATION lib/${PROJECT_NAME})
 
 # ---- launch / config ----
 install(DIRECTORY launch
