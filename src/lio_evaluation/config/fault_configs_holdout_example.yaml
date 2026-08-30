@@ -1,0 +1,11 @@
+# P2.3 V5: held-out fault injection 配置 (与标定集 C3 corridor_run1_faults.yaml 不同段/类型/seed)
+# 用途: 在 fresh corridor_run2 数据上注入 held-out 故障段, 验证 attribution 泛化。
+# 标定集 C3: dropout90 / fov_crop / outlier0.12 / noise0.25, seed=42
+# 验证集 V5: outlier8 / dropout80 / noise0.15, seed=7 (不同时刻段)
+fault:
+  output_topic: /livox/lidar_faulty
+  seed: 7
+  segments:
+    - {start: 25.0, end: 35.0, type: outlier, ratio: 0.08, radius_m: 2.0}
+    - {start: 45.0, end: 55.0, type: dropout, ratio: 0.80}
+    - {start: 70.0, end: 80.0, type: noise,   std_m: 0.15}

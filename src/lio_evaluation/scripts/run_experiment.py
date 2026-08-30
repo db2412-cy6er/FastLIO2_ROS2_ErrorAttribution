@@ -436,8 +436,16 @@ def cmd_run_online(args):
         print(f"[run-online][HEALTH-OK] {reason}")
 
         # 3. fast_lio (使用实验配置, 按 algo 开启退化检测) — 世界就绪后再启动
+        #    --fault 时改用 mid360_fault.yaml (订阅 /livox/lidar_faulty) + 启动 injector
+        fault_cfg = getattr(args, "fault", None)
+        config_file = "mid360.yaml"
+        injector_proc = None
+        if fault_cfg:
+            config_file = write_fault_lidar_config(exp_dir)
+            write_fault_annotations(exp_dir, os.path.abspath(fault_cfg))
+            print(f"[run-online] fault injection 已启用: {os.path.abspath(fault_cfg)}")
         fastlio_cmd = ["ros2", "launch", "fast_lio", "mapping.launch.py",
-                       f"config_path:={exp_dir}", "config_file:=mid360.yaml",
+                       f"config_path:={exp_dir}", f"config_file:={config_file}",
                        "use_sim_time:=true",
                        *_fastlio_health_args(exp_dir)]
         if getattr(args, "no_rviz", False):
@@ -453,6 +461,13 @@ def cmd_run_online(args):
             ["ros2", "launch", "ground_truth_bridge", "ground_truth_bridge_launch.py",
              "use_sim_time:=true"],
             os.path.join(logdir, "gt.log")))
+        # 5b. fault injector (需在 lidar 发布后启动, 先于运动驱动)
+        if fault_cfg:
+            inj = _launch(
+                [sys.executable, FAULT_INJECTOR, "--ros-args",
+                 "-p", "use_sim_time:=true", "-p", f"config:={os.path.abspath(fault_cfg)}"],
+                os.path.join(logdir, "injector.log"))
+            procs.append(inj)
         time.sleep(3)  # 等 fast_lio/eval/gt 节点完成发现与启动
 
         # ---- 运动驱动：脚本漫游 / 手动遥控(WASD) / 禁用 ----
@@ -613,7 +628,8 @@ def cmd_all(args):
             no_drive=args.no_drive, teleop=args.teleop, headless=args.headless,
             no_rviz=args.no_rviz, health_abort=args.health_abort,
             drive_mode=getattr(args, "drive_mode", "wander"),
-            pause_sec=getattr(args, "pause_sec", 4.0)))
+            pause_sec=getattr(args, "pause_sec", 4.0),
+            fault=getattr(args, "fault", None)))
     cmd_eval(argparse.Namespace(exp_dir=exp_dir))
 
 
@@ -667,6 +683,7 @@ def main():
     p_run.add_argument("exp_dir")
     _add_world_args(p_run)
     _add_spawn_args(p_run)
+    _add_fault_arg(p_run)
     p_run.add_argument("--duration", type=int, default=60)
     p_run.set_defaults(func=cmd_run_online)
 
