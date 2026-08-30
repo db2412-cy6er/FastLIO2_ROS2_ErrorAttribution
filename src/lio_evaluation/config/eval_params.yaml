@@ -1,0 +1,28 @@
+# lio_evaluation 默认评测参数 (M4/M5/M6)
+#
+# 话题映射 (traj_map 逗号分隔: topic:file)
+traj_map: "/gt_odom:groundtruth.txt,/Odometry:fastlio.txt"
+enable_degen: true
+enable_iter: true
+
+# 退化阈值 (与 fast_lio mid360.yaml 的 degeneracy.* 一致, 保证双检测器同口径)
+degeneracy:
+  threshold_t: 0.02
+  threshold_r: 0.02
+  ema_alpha: 0.5
+  score_enter: 0.4
+  score_exit: 0.2
+  min_enter_frames: 3
+  min_exit_frames: 5
+
+# proxy 检测器几何重建参数 (M3)
+proxy:
+  cloud_topic: "/cloud_registered"
+  odom_topic: "/Odometry"
+  score_topic: "/lio/degeneracy_score_proxy"
+  scan_voxel: 0.5
+  map_voxel: 0.5
+  k_neighbors: 5
+  max_nn_dist: 2.0
+  plane_ratio_th: 0.2
+  map_lifetime: 30.0

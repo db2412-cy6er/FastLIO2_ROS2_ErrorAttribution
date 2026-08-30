@@ -1,0 +1,15 @@
+# P2 LiDAR fault injection 示例配置 (E5: CORRESPONDENCE_FAILURE 可控注入, 强化版)
+# 用法: run_experiment.py all --scenario corridor --bag data/bags/corridor_run1 \
+#         --fault data/fault_configs/corridor_run1_faults.yaml --duration 95
+# 注: 注入段时间以 bag 回放时的仿真时刻为基准 (injector 以首帧到达为 t0)。
+# 强化版: dropout 90% / fov_crop 更窄 / outlier 更大 / noise 更大, 制造明确的
+#   correspondence/matching 退化信号 (特征数骤降 / 残差尖峰)。
+fault:
+  output_topic: /livox/lidar_faulty
+  seed: 42
+  segments:
+    - {start: 20.0, end: 30.0, type: dropout,  ratio: 0.90}
+    - {start: 40.0, end: 50.0, type: fov_crop, az_min_deg: -20, az_max_deg: 20,
+       el_min_deg: -5, el_max_deg: 15}
+    - {start: 60.0, end: 65.0, type: outlier, ratio: 0.12, radius_m: 4.0}
+    - {start: 75.0, end: 85.0, type: noise,   std_m: 0.25}

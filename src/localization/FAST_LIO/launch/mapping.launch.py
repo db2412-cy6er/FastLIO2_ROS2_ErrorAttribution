@@ -21,10 +21,22 @@ def generate_launch_description():
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
+    # P2: health 参数经 launch 传入 (绕开 rcl_yaml_param_parser 对 yaml 嵌套块
+    # 的解析缺陷; 与 use_sim_time 同机制)。默认 false = 零侵入。
+    health_enable = LaunchConfiguration('health_enable')
+    health_imu_window_sec = LaunchConfiguration('health_imu_window_sec')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
         description='Use simulation (Gazebo) clock if true'
+    )
+    declare_health_enable_cmd = DeclareLaunchArgument(
+        'health_enable', default_value='false',
+        description='P2: 发布 /lio/health (须同时 degeneracy.enable=true)'
+    )
+    declare_health_window_cmd = DeclareLaunchArgument(
+        'health_imu_window_sec', default_value='0.5',
+        description='P2: rolling IMU excitation 统计窗口 (s)'
     )
     declare_config_path_cmd = DeclareLaunchArgument(
         'config_path', default_value=default_config_path,
@@ -47,7 +59,9 @@ def generate_launch_description():
         package='fast_lio',
         executable='fastlio_mapping',
         parameters=[PathJoinSubstitution([config_path, config_file]),
-                    {'use_sim_time': use_sim_time}],
+                    {'use_sim_time': use_sim_time,
+                     'health.enable': health_enable,
+                     'health.imu_window_sec': health_imu_window_sec}],
         output='screen'
     )
     rviz_node = Node(
@@ -63,6 +77,8 @@ def generate_launch_description():
     ld.add_action(decalre_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
+    ld.add_action(declare_health_enable_cmd)
+    ld.add_action(declare_health_window_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(rviz_node)

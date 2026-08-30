@@ -62,6 +62,12 @@
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#include <Eigen/Eigenvalues>
+#include <limits>
+#include <lio_interfaces/msg/degeneracy_score.hpp>
+#include <lio_interfaces/msg/degeneracy_iteration.hpp>
+#include <lio_interfaces/msg/lio_health.hpp>
+#include <lio_interfaces/msg/error_attribution.hpp>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -142,6 +148,370 @@ geometry_msgs::msg::PoseStamped msg_body_pose;
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
+
+/*** ==================== Degeneracy Detection (P1) ====================
+ * 内嵌精确检测器: 基于真实参与 IEKF 更新的测量 Jacobian (h_x) 累积
+ * LiDAR geometric Hessian (measurement Hessian):
+ *   Ht = Σ n nᵀ              (3x3, 平动块, 世界系法向量)
+ *   Hr = Σ (p×n)(p×n)ᵀ       (3x3, 转动块, body 系)
+ *   H6 = Σ j jᵀ,  j = h_x[i,0:6]  (6x6, 完整 pose geometric Hessian, 仅保存)
+ * 理论口径: 该矩阵只反映当前 scan-to-map 匹配提供的几何约束,
+ * 不是滤波器完整信息状态 (不含 measurement noise / state covariance)。
+ ***********************************************************************/
+bool   degeneracy_enable = false;
+bool   degeneracy_debug_iterations = false;
+double degeneracy_thresh_t = 0.02;   // Ht 平动块 ratio 阈值
+double degeneracy_thresh_r = 0.02;   // Hr 转动块 ratio 阈值
+double degeneracy_ema_alpha = 0.5;   // score EMA 系数
+double degeneracy_score_enter = 0.4; // 进入退化状态的 EMA score 阈值
+double degeneracy_score_exit  = 0.2; // 退出退化状态的 EMA score 阈值
+int    degeneracy_min_enter = 3;     // 进入退化所需连续帧数
+int    degeneracy_min_exit  = 5;     // 退出退化所需连续帧数
+
+/*** ==================== LIO Health Monitor (P2) ====================
+ * 在 P1 退化检测之上聚合 P2 输入信号:
+ *   - geometry / matching (来自 DegeneracyData)
+ *   - filter covariance (kf.get_P(), DOF: pos0-2 rot3-5 ... bg15-17 ba18-20)
+ *   - IMU excitation (rolling buffer, health.imu_window_sec)
+ * 发布 /lio/health (degeneracy.enable && health.enable 门控, 默认不发布)。
+ ***********************************************************************/
+bool   health_enable = false;
+double health_imu_window_sec = 0.5;  // rolling IMU 统计窗口 (s)
+rclcpp::Publisher<lio_interfaces::msg::LioHealth>::SharedPtr health_pub_;
+
+struct ImuHealthSample
+{
+  double t;
+  double ax, ay, az;
+  double gx, gy, gz;
+};
+std::deque<ImuHealthSample> health_imu_buf_;
+
+rclcpp::Publisher<lio_interfaces::msg::DegeneracyScore>::SharedPtr degen_pub_;
+rclcpp::Publisher<lio_interfaces::msg::DegeneracyIteration>::SharedPtr degen_iter_pub_;
+rclcpp::Clock::SharedPtr degen_clock_;
+int degen_frame_index = 0;
+
+struct DegeneracyData
+{
+  bool valid = false;
+  double trans_ratio = 1.0;               // Ht λmin/λmax
+  double rot_ratio = 1.0;                 // Hr λmin/λmax
+  double normal_concentration = 1.0 / 3.0;// 法向量集中度 μ1/Σμ
+  double condition_number = 1.0;          // H6 条件数
+  Eigen::VectorXd eigenvalues6 = Eigen::VectorXd::Ones(6);   // H6 特征值(升序)
+  Eigen::VectorXd weak_direction = Eigen::VectorXd::Zero(6); // H6 最小特征向量
+  int effective_feature_num = 0;
+  double mean_residual = 0.0;
+  // 平滑状态机 (EMA + hysteresis)
+  bool ema_inited = false;
+  double ema_score = 0.0;
+  bool is_degenerate = false;
+  int enter_count = 0;
+  int exit_count = 0;
+  // debug
+  int iter_count = 0;
+  // P2 health 扩展
+  int candidate_feature_num = 0;          // 候选匹配点数 (feats_down_size)
+  double effective_feature_ratio = 1.0;   // effective/candidate
+  double residual_p90 = 0.0;              // 有效点残差 90 分位
+  Eigen::Vector3d weak_translation_direction = Eigen::Vector3d::UnitZ(); // Ht 最小特征向量 (世界系)
+  Eigen::Vector3d weak_rotation_direction = Eigen::Vector3d::UnitZ();    // Hr 最小特征向量 (body 系)
+  int weak_mode_index = 0;                // 最小特征值模态下标
+  int dominant_weak_axis = 2;             // argmax(|weak_direction|) 状态维 0-5
+};
+DegeneracyData degen_data;
+
+void compute_geometric_hessian(const esekfom::dyn_share_datastruct<double> &ekfom_data, DegeneracyData &out)
+{
+  const int m = static_cast<int>(ekfom_data.h_x.rows());
+  out.valid = (m >= 1);
+  if (!out.valid) return;
+
+  Eigen::Matrix3d Ht = Eigen::Matrix3d::Zero();
+  Eigen::Matrix3d Hr = Eigen::Matrix3d::Zero();
+  Eigen::Matrix<double, 6, 6> H6 = Eigen::Matrix<double, 6, 6>::Zero();
+
+  for (int i = 0; i < m; i++)
+  {
+    Eigen::Matrix<double, 1, 12> h = ekfom_data.h_x.row(i);
+    Eigen::Vector3d n = h.head<3>().transpose();     // 平动 Jacobian (世界系法向量)
+    Eigen::Vector3d a = h.segment<3>(3).transpose(); // 转动 Jacobian (body 系 p×n)
+    Ht.noalias() += n * n.transpose();
+    Hr.noalias() += a * a.transpose();
+    Eigen::Matrix<double, 6, 1> j;
+    j << n, a;
+    H6.noalias() += j * j.transpose();
+  }
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_t(Ht);
+  Eigen::Vector3d wt = es_t.eigenvalues(); // ascending
+  out.trans_ratio = (wt(2) > 1e-12) ? wt(0) / wt(2) : 0.0;
+  out.normal_concentration = (wt.sum() > 1e-12) ? wt(2) / wt.sum() : 0.0;
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_r(Hr);
+  Eigen::Vector3d wr = es_r.eigenvalues();
+  out.rot_ratio = (wr(2) > 1e-12) ? wr(0) / wr(2) : 0.0;
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es6(H6);
+  out.eigenvalues6 = es6.eigenvalues();               // ascending
+  out.weak_direction = es6.eigenvectors().col(0);     // 最小特征值特征向量
+  out.condition_number = (out.eigenvalues6(0) > 1e-12)
+    ? out.eigenvalues6(5) / out.eigenvalues6(0)
+    : std::numeric_limits<double>::max();
+
+  out.effective_feature_num = m;
+  out.mean_residual = (m > 0) ? total_residual / m : 0.0;
+
+  // ── P2 health 扩展 ──
+  // 纯平移弱方向 (Ht 最小特征向量, 世界系; 与 GT 位置误差比较前需 R_align)
+  out.weak_translation_direction = es_t.eigenvectors().col(0);
+  // 纯转动弱方向 (Hr 最小特征向量, body 系)
+  out.weak_rotation_direction = es_r.eigenvectors().col(0);
+  // 最小特征值模态下标 (SelfAdjointEigenSolver 特征值升序, 显式 argmin 更稳)
+  int argmin = 0;
+  for (int i = 1; i < 6; i++)
+    if (out.eigenvalues6(i) < out.eigenvalues6(argmin)) argmin = i;
+  out.weak_mode_index = argmin;
+  // 主弱轴: weak_direction 中绝对值最大的状态维 (粗略, 不作严格方向判定)
+  double max_c = -1.0;
+  int max_i = 2;
+  for (int i = 0; i < 6; i++)
+  {
+    const double c = std::fabs(out.weak_direction(i));
+    if (c > max_c) { max_c = c; max_i = i; }
+  }
+  out.dominant_weak_axis = max_i;
+  // matching 相对指标
+  out.candidate_feature_num = feats_down_size;
+  out.effective_feature_ratio = (feats_down_size > 0)
+    ? static_cast<double>(m) / static_cast<double>(feats_down_size) : 0.0;
+  // 有效点残差 90 分位 (对局部匹配恶化更敏感)
+  if (m > 0)
+  {
+    const long idx = static_cast<long>(0.9 * static_cast<double>(m - 1));
+    std::vector<float> res(res_last, res_last + m);
+    std::nth_element(res.begin(), res.begin() + idx, res.end());
+    out.residual_p90 = res[idx];
+  }
+  else { out.residual_p90 = 0.0; }
+}
+
+void publish_degeneracy_iteration()
+{
+  if (!degen_iter_pub_ || !degen_data.valid) return;
+  lio_interfaces::msg::DegeneracyIteration msg;
+  msg.header.stamp = get_ros_time(lidar_end_time);
+  msg.iteration = degen_data.iter_count;
+  msg.frame_index = degen_frame_index;
+  msg.total_residual = total_residual;
+  msg.mean_residual = degen_data.mean_residual;
+  msg.effective_feature_num = degen_data.effective_feature_num;
+  msg.trans_ratio = degen_data.trans_ratio;
+  msg.rot_ratio = degen_data.rot_ratio;
+  msg.lambda_max = degen_data.eigenvalues6(5);
+  msg.lambda_min = degen_data.eigenvalues6(0);
+  degen_iter_pub_->publish(msg);
+}
+
+void publish_degeneracy_score()
+{
+  if (!degen_pub_ || !degen_data.valid) return;
+
+  // raw score: 0 = 健康(ratio>=阈值), 越接近 1 = 越退化(ratio→0)
+  double raw = std::max(
+    1.0 - degen_data.trans_ratio / degeneracy_thresh_t,
+    1.0 - degen_data.rot_ratio   / degeneracy_thresh_r);
+  raw = std::min(1.0, std::max(0.0, raw));
+
+  // EMA 平滑
+  if (!degen_data.ema_inited)
+  {
+    degen_data.ema_score = raw;
+    degen_data.ema_inited = true;
+  }
+  else
+  {
+    degen_data.ema_score =
+      degeneracy_ema_alpha * raw + (1.0 - degeneracy_ema_alpha) * degen_data.ema_score;
+  }
+
+  // hysteresis 状态机 (进入/退出采用不同阈值 + 连续帧确认)
+  if (!degen_data.is_degenerate)
+  {
+    if (degen_data.ema_score > degeneracy_score_enter)
+    {
+      if (++degen_data.enter_count >= degeneracy_min_enter)
+      {
+        degen_data.is_degenerate = true;
+        degen_data.enter_count = 0;
+        RCLCPP_WARN_THROTTLE(rclcpp::get_logger("laser_mapping"), *degen_clock_, 5000,
+          "[Degeneracy] ENTER: score=%.3f trans_ratio=%.4f rot_ratio=%.4f feats=%d",
+          degen_data.ema_score, degen_data.trans_ratio, degen_data.rot_ratio,
+          degen_data.effective_feature_num);
+      }
+    }
+    else { degen_data.enter_count = 0; }
+  }
+  else
+  {
+    if (degen_data.ema_score < degeneracy_score_exit)
+    {
+      if (++degen_data.exit_count >= degeneracy_min_exit)
+      {
+        degen_data.is_degenerate = false;
+        degen_data.exit_count = 0;
+      }
+    }
+    else { degen_data.exit_count = 0; }
+  }
+
+  lio_interfaces::msg::DegeneracyScore msg;
+  msg.header.stamp = get_ros_time(lidar_end_time);
+  msg.score = degen_data.ema_score;
+  msg.is_degenerate = degen_data.is_degenerate;
+  msg.trans_ratio = degen_data.trans_ratio;
+  msg.rot_ratio = degen_data.rot_ratio;
+  msg.condition_number = degen_data.condition_number;
+  msg.normal_concentration = degen_data.normal_concentration;
+  for (int i = 0; i < 6; i++)
+  {
+    msg.eigenvalues[i] = degen_data.eigenvalues6(i);
+    msg.weak_direction[i] = degen_data.weak_direction(i);
+  }
+  msg.effective_feature_num = degen_data.effective_feature_num;
+  msg.mean_residual = degen_data.mean_residual;
+  msg.pos_x = state_point.pos(0);
+  msg.pos_y = state_point.pos(1);
+  msg.pos_z = state_point.pos(2);
+  degen_pub_->publish(msg);
+}
+
+/*** P2: rolling IMU excitation 统计 (health_imu_buf_, 窗口 health.imu_window_sec)
+ *  - gyr_exc  = RMS(|ω|)                        (转动激励)
+ *  - acc_exc  = sqrt(var_ax+var_ay+var_az)      (平动动态激励, 三轴去均值后合成;
+ *              静止≈0, 匀速≈0, 加减速/转向时明显升高 —— 比 |a|-g 更稳定)
+ *  - 另输出三轴 RMS / 方差供离线分析。
+ ***/
+void compute_imu_excitation(unsigned int &sample_num, double gyro_rms[3],
+    double gyro_var[3], double acc_var[3], double &gyr_exc, double &acc_exc)
+{
+  sample_num = 0;
+  gyr_exc = 0.0;
+  acc_exc = 0.0;
+  for (int i = 0; i < 3; i++) { gyro_rms[i] = 0.0; gyro_var[i] = 0.0; acc_var[i] = 0.0; }
+  if (health_imu_buf_.empty()) return;
+
+  const double now_t = health_imu_buf_.back().t;
+  while (!health_imu_buf_.empty() &&
+         now_t - health_imu_buf_.front().t > health_imu_window_sec)
+    health_imu_buf_.pop_front();
+
+  const int n = static_cast<int>(health_imu_buf_.size());
+  if (n < 1) return;
+
+  double mgx = 0, mgy = 0, mgz = 0, max_ = 0, may = 0, maz = 0;
+  for (const auto &s : health_imu_buf_)
+  {
+    mgx += s.gx; mgy += s.gy; mgz += s.gz;
+    max_ += s.ax; may += s.ay; maz += s.az;
+  }
+  mgx /= n; mgy /= n; mgz /= n; max_ /= n; may /= n; maz /= n;
+
+  double vgx = 0, vgy = 0, vgz = 0, vax = 0, vay = 0, vaz = 0, gyr_mag2 = 0;
+  for (const auto &s : health_imu_buf_)
+  {
+    const double dgx = s.gx - mgx, dgy = s.gy - mgy, dgz = s.gz - mgz;
+    vgx += dgx * dgx; vgy += dgy * dgy; vgz += dgz * dgz;
+    const double dax = s.ax - max_, day = s.ay - may, daz = s.az - maz;
+    vax += dax * dax; vay += day * day; vaz += daz * daz;
+    gyr_mag2 += s.gx * s.gx + s.gy * s.gy + s.gz * s.gz;
+  }
+  vgx /= n; vgy /= n; vgz /= n; vax /= n; vay /= n; vaz /= n;
+
+  sample_num = static_cast<unsigned int>(n);
+  gyro_var[0] = vgx; gyro_var[1] = vgy; gyro_var[2] = vgz;
+  acc_var[0] = vax;  acc_var[1] = vay;  acc_var[2] = vaz;
+  gyro_rms[0] = std::sqrt(mgx * mgx + vgx);
+  gyro_rms[1] = std::sqrt(mgy * mgy + vgy);
+  gyro_rms[2] = std::sqrt(mgz * mgz + vgz);
+  gyr_exc = std::sqrt(gyr_mag2 / n);
+  acc_exc = std::sqrt(vax + vay + vaz);
+}
+
+void publish_lio_health()
+{
+  if (!health_pub_ || !degen_data.valid) return;
+
+  lio_interfaces::msg::LioHealth msg;
+  msg.header.stamp = get_ros_time(lidar_end_time);
+  msg.header.frame_id = "camera_init";
+
+  // ── geometry ──
+  msg.score = degen_data.ema_score;
+  msg.is_degenerate = degen_data.is_degenerate;
+  msg.trans_ratio = degen_data.trans_ratio;
+  msg.rot_ratio = degen_data.rot_ratio;
+  msg.condition_number = degen_data.condition_number;
+  msg.normal_concentration = degen_data.normal_concentration;
+  for (int i = 0; i < 6; i++)
+  {
+    msg.eigenvalues[i] = degen_data.eigenvalues6(i);
+    msg.weak_direction[i] = degen_data.weak_direction(i);
+  }
+  msg.weak_mode_index = static_cast<uint8_t>(degen_data.weak_mode_index);
+  msg.dominant_weak_axis = static_cast<uint8_t>(degen_data.dominant_weak_axis);
+  for (int i = 0; i < 3; i++)
+  {
+    msg.weak_translation_direction[i] = degen_data.weak_translation_direction(i);
+    msg.weak_rotation_direction[i] = degen_data.weak_rotation_direction(i);
+  }
+
+  // ── matching ──
+  msg.effective_feature_num = static_cast<uint32_t>(degen_data.effective_feature_num);
+  msg.candidate_feature_num = static_cast<uint32_t>(degen_data.candidate_feature_num);
+  msg.effective_feature_ratio = degen_data.effective_feature_ratio;
+  msg.mean_residual = degen_data.mean_residual;
+  msg.residual_p90 = degen_data.residual_p90;
+  msg.total_residual = total_residual;
+
+  // ── filter covariance (const ref, 无拷贝) ──
+  const auto &P = kf.get_P();   // 23x23
+  msg.pos_cov_trace = P(0, 0) + P(1, 1) + P(2, 2);
+  msg.rot_cov_trace = P(3, 3) + P(4, 4) + P(5, 5);
+  for (int i = 0; i < 3; i++)
+  {
+    msg.pose_cov_diag[i] = P(i, i);
+    msg.pose_cov_diag[3 + i] = P(3 + i, 3 + i);
+    msg.bg_cov_diag[i] = P(15 + i, 15 + i);
+    msg.ba_cov_diag[i] = P(18 + i, 18 + i);
+  }
+  msg.bg_cov_trace = P(15, 15) + P(16, 16) + P(17, 17);
+  msg.ba_cov_trace = P(18, 18) + P(19, 19) + P(20, 20);
+
+  // ── IMU excitation ──
+  unsigned int sample_num = 0;
+  double gyro_rms[3] = {0.0};
+  double gyro_var[3] = {0.0};
+  double acc_var[3] = {0.0};
+  double gyr_exc = 0.0, acc_exc = 0.0;
+  compute_imu_excitation(sample_num, gyro_rms, gyro_var, acc_var, gyr_exc, acc_exc);
+  msg.imu_sample_num = sample_num;
+  for (int i = 0; i < 3; i++)
+  {
+    msg.imu_gyr_rms[i] = gyro_rms[i];
+    msg.imu_gyr_var[i] = gyro_var[i];
+    msg.imu_acc_var[i] = acc_var[i];
+  }
+  msg.imu_gyr_excitation = gyr_exc;
+  msg.imu_acc_excitation = acc_exc;
+
+  msg.pos_x = state_point.pos(0);
+  msg.pos_y = state_point.pos(1);
+  msg.pos_z = state_point.pos(2);
+
+  health_pub_->publish(msg);
+}
 
 void SigHandle(int sig)
 {
@@ -376,6 +746,21 @@ void imu_cbk(const sensor_msgs::msg::Imu::UniquePtr msg_in)
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+
+    // P2: 追加到 health rolling IMU buffer (窗口内样本统计 excitation)
+    ImuHealthSample hs;
+    hs.t = timestamp;
+    hs.ax = msg->linear_acceleration.x;
+    hs.ay = msg->linear_acceleration.y;
+    hs.az = msg->linear_acceleration.z;
+    hs.gx = msg->angular_velocity.x;
+    hs.gy = msg->angular_velocity.y;
+    hs.gz = msg->angular_velocity.z;
+    health_imu_buf_.push_back(hs);
+    // 内存有界: 只保留最近 ~4× 窗口
+    while (health_imu_buf_.size() > 2 &&
+           timestamp - health_imu_buf_.front().t > 4.0 * health_imu_window_sec)
+      health_imu_buf_.pop_front();
 }
 
 double lidar_mean_scantime = 0.0;
@@ -790,6 +1175,18 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
+
+    /*** Degeneracy Detection (P1): LiDAR geometric Hessian from real IEKF Jacobians ***/
+    if (degeneracy_enable)
+    {
+        degen_data.iter_count++;
+        compute_geometric_hessian(ekfom_data, degen_data);
+        if (degeneracy_debug_iterations)
+        {
+            publish_degeneracy_iteration();
+        }
+    }
+
     solve_time += omp_get_wtime() - solve_start_;
 }
 
@@ -833,6 +1230,15 @@ public:
         this->declare_parameter<int>("pcd_save.interval", -1);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
+        this->declare_parameter<bool>("degeneracy.enable", false);
+        this->declare_parameter<bool>("degeneracy.debug_iterations", false);
+        this->declare_parameter<double>("degeneracy.threshold_t", 0.02);
+        this->declare_parameter<double>("degeneracy.threshold_r", 0.02);
+        this->declare_parameter<double>("degeneracy.ema_alpha", 0.5);
+        this->declare_parameter<double>("degeneracy.score_enter", 0.4);
+        this->declare_parameter<double>("degeneracy.score_exit", 0.2);
+        this->declare_parameter<int>("degeneracy.min_enter_frames", 3);
+        this->declare_parameter<int>("degeneracy.min_exit_frames", 5);
 
         this->get_parameter_or<bool>("publish.path_en", path_en, true);
         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
@@ -869,6 +1275,21 @@ public:
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
+        this->get_parameter_or<bool>("degeneracy.enable", degeneracy_enable, false);
+        this->get_parameter_or<bool>("degeneracy.debug_iterations", degeneracy_debug_iterations, false);
+        this->get_parameter_or<double>("degeneracy.threshold_t", degeneracy_thresh_t, 0.02);
+        this->get_parameter_or<double>("degeneracy.threshold_r", degeneracy_thresh_r, 0.02);
+        this->get_parameter_or<double>("degeneracy.ema_alpha", degeneracy_ema_alpha, 0.5);
+        this->get_parameter_or<double>("degeneracy.score_enter", degeneracy_score_enter, 0.4);
+        this->get_parameter_or<double>("degeneracy.score_exit", degeneracy_score_exit, 0.2);
+        this->get_parameter_or<int>("degeneracy.min_enter_frames", degeneracy_min_enter, 3);
+        this->get_parameter_or<int>("degeneracy.min_exit_frames", degeneracy_min_exit, 5);
+        // P2 health 参数: 经 launch 参数 dict 传入 (yaml 嵌套块解析有缺陷)。
+        // 显式 declare 为 bool/double, 使 launch 传入的字符串 override 可正确类型转换。
+        this->declare_parameter<bool>("health.enable", health_enable);
+        this->declare_parameter<double>("health.imu_window_sec", health_imu_window_sec);
+        this->get_parameter_or<bool>("health.enable", health_enable, false);
+        this->get_parameter_or<double>("health.imu_window_sec", health_imu_window_sec, 0.5);
 
         RCLCPP_INFO(this->get_logger(), "p_pre->lidar_type %d", p_pre->lidar_type);
 
@@ -934,6 +1355,10 @@ public:
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        degen_pub_ = this->create_publisher<lio_interfaces::msg::DegeneracyScore>("/lio/degeneracy_score", 20);
+        degen_iter_pub_ = this->create_publisher<lio_interfaces::msg::DegeneracyIteration>("/lio/degeneracy_iterations", 40);
+        degen_clock_ = this->get_clock();
+        health_pub_ = this->create_publisher<lio_interfaces::msg::LioHealth>("/lio/health", 20);
 
         //------------------------------------------------------------------------------------------------------
         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
@@ -1049,6 +1474,7 @@ private:
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            degen_data.iter_count = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
@@ -1059,6 +1485,19 @@ private:
             geoQuat.w = state_point.rot.coeffs()[3];
 
             double t_update_end = omp_get_wtime();
+
+            /*** Publish degeneracy score (once per LiDAR measurement update) ***/
+            if (degeneracy_enable)
+            {
+                degen_frame_index = frame_num;
+                publish_degeneracy_score();
+            }
+
+            /*** Publish LIO health (P2, same timestamp as degen score) ***/
+            if (degeneracy_enable && health_enable)
+            {
+                publish_lio_health();
+            }
 
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);

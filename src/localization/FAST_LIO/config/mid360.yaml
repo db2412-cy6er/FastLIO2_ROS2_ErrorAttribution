@@ -49,3 +49,29 @@
             pcd_save_en: true
             interval: -1                 # how many LiDAR frames saved in each pcd file; 
                                         # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+        # ============ P1 Degeneracy Detection (exact, in-tree) ============
+        # 内嵌精确检测器基于真实参与 IEKF 更新的测量 Jacobian 累积
+        # LiDAR geometric Hessian (Ht/Hr), 每帧发布 /lio/degeneracy_score。
+        # enable 默认 false: 行为与原始 FAST-LIO 数值等价 (零侵入)。
+        degeneracy:
+            enable: false                # true: 计算并发布退化分数
+            debug_iterations: false      # true: 额外发布 /lio/degeneracy_iterations (IEKF 每迭代观测)
+            threshold_t: 0.10            # Ht 平动块 λmin/λmax 退化阈值
+                                         # (P1.3 corridor 实测标定: 0.02 时 corridor 漏检 0.0%,
+                                         #  0.10~0.15 时检出 99.6%, 取 0.10)
+            threshold_r: 0.02            # Hr 转动块 λmin/λmax 退化阈值
+            ema_alpha: 0.5               # score EMA 平滑系数
+            score_enter: 0.4             # 进入退化状态的 EMA score 阈值 (hysteresis 上沿)
+            score_exit: 0.2              # 退出退化状态的 EMA score 阈值 (hysteresis 下沿)
+            min_enter_frames: 3          # 进入退化所需连续帧数
+            min_exit_frames: 5           # 退出退化所需连续帧数
+
+        # ============ P2 LIO Health Monitor ============
+        # 聚合 geometry/matching + filter covariance + IMU excitation,
+        # 每帧发布 /lio/health (与 /lio/degeneracy_score 同时间戳)。
+        # enable 默认 false (与 degeneracy.enable=false 同哲学: 零侵入);
+        # 实验时由 run_experiment 显式同时打开 degeneracy.enable + health.enable。
+        health:
+            enable: false                # true 且 degeneracy.enable: true 时发布 /lio/health
+            imu_window_sec: 0.5          # rolling IMU excitation 统计窗口 (s)

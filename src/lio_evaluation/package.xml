@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lio_evaluation</name>
+  <version>0.1.0</version>
+  <description>
+    FAST-LIO 退化检测评测模块 (P1: Degeneracy Detection and Evaluation)。
+    - degeneracy_proxy_node: 外部几何代理检测器 (External Geometry Proxy Detector)
+      订阅 /cloud_registered + /Odometry, 自维护局部地图重建几何约束,
+      与 FAST-LIO 内嵌精确检测器做旁路对照验证 (非独立真值)。
+    - recorder_node / monitor_node: 在线采集 (TUM 轨迹 / degen CSV / CPU/内存)。
+    - compute_metrics / run_experiment: 离线 ATE/RPE/退化一致性分析 + 实验编排。
+    所有落盘 (CSV/TUM/result.yaml) 统一由本模块负责, fast_lio 内部只发布不写盘。
+  </description>
+  <maintainer email="liyuminglyx@163.com">pio</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>lio_interfaces</depend>
+  <depend>pcl_conversions</depend>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-psutil</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
