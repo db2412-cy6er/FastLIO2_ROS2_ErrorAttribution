@@ -15,8 +15,8 @@ cd "$WORKSPACE_ROOT" || exit 1
 # source install/setup.bash; 
 # ros2 launch nav2_bringup bringup_launch.py \
 # use_sim_time:=True \
-# map:=/home/pio/Nav2_ws/src/nav2/maps/test_map.yaml \
-# params_file:=/home/pio/Nav2_ws/src/nav2/config/my_nav2_params.yaml"
+# map:=/path/to/nav2/src/nav2/maps/test_map.yaml \
+# params_file:=/path/to/nav2/src/nav2/config/my_nav2_params.yaml"
 
 # 删除后台运行的Gazebo进程
 # killall -9 gzserver gzclient
@@ -29,20 +29,20 @@ cd "$WORKSPACE_ROOT" || exit 1
 # ros2 launch nav2_bringup bringup_launch.py \
 # use_sim_time:=True \
 # slam:=True \
-# map:=/home/pio/Nav2_ws/src/nav2/maps/test_map.yaml \
-# params_file:=/home/pio/Nav2_ws/src/nav2/config/my_nav2_params.yaml"
+# map:=/path/to/nav2/src/nav2/maps/test_map.yaml \
+# params_file:=/path/to/nav2/src/nav2/config/my_nav2_params.yaml"
 
 # # slam_toolbox 纯定位
 # gnome-terminal --title="localization" -- bash -c "source install/setup.bash; \
 # ros2 launch slam_toolbox localization_launch.py \
 # use_sim_time:=True \
-# slam_params_file:=/home/pio/Nav2_ws/src/nav2/config/my_localization_params.yaml"
+# slam_params_file:=/path/to/nav2/src/nav2/config/my_localization_params.yaml"
 
 # # nav2 纯导航
 # gnome-terminal --title="navigation" -- bash -c "source install/setup.bash; \
 # ros2 launch nav2_bringup navigation_launch.py \
 # use_sim_time:=True \
-# params_file:=/home/pio/Nav2_ws/src/nav2/config/my_nav2_params.yaml"
+# params_file:=/path/to/nav2/src/nav2/config/my_nav2_params.yaml"
 
 
 # 3D SLAM
@@ -81,4 +81,4 @@ ros2 launch global_relocalization_kiss_matcher global_kiss_matcher_relocalizatio
 
 # ros2 launch slam_toolbox online_async_launch.py \
 #     use_sim_time:=true \
-#     slam_params_file:=/home/pio/Nav2_3D_ws/src/me_nav2_bringup/config/slam_toolbox_params.yaml
+#     slam_params_file:=$WORKSPACE_ROOT/src/me_nav2_bringup/config/slam_toolbox_params.yaml

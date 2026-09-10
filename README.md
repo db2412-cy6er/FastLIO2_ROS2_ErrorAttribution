@@ -1,4 +1,4 @@
-# Lidar_nav2_ws
+# FastLIO2_ROS2_ErrorAttribution
 
 [English Documentation](./README_EN.md)
 
@@ -13,7 +13,7 @@
   <img src="docs/KISS%20show_2.gif" alt="KISS demo 2" width="48%">
 </p>
 
-**Nav2_3D** 是一个面向四轮滑移转向机器人的 ROS 2 Humble 导航工作空间。系统以 Livox MID-360 3D LiDAR 和 IMU 为核心传感器，集成 LiDAR-Inertial Odometry (LIO) 里程计、3D 点云重定位和 Nav2 导航框架，支持 **Gazebo 仿真**与**实机部署**，仅需切换启动脚本即可在两种模式间无缝切换。
+**FastLIO2_ROS2_ErrorAttribution** 是一个面向四轮滑移转向机器人的 ROS 2 Humble 导航工作空间。系统以 Livox MID-360 3D LiDAR 和 IMU 为核心传感器，集成 LiDAR-Inertial Odometry (LIO) 里程计、3D 点云重定位和 Nav2 导航框架，支持 **Gazebo 仿真**与**实机部署**，仅需切换启动脚本即可在两种模式间无缝切换。
 
 核心特性：
 

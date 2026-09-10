@@ -11,7 +11,7 @@ def generate_launch_description():
 
     用法示例:
       ros2 launch ground_truth_bridge ground_truth_bridge_launch.py \
-          log_file:=/home/db2412/Lidar_nav2_ws/data/trajs/gt.txt
+          log_file:=~/FastLIO2_ROS2_ErrorAttribution/data/trajs/gt.txt
     """
     return LaunchDescription([
         DeclareLaunchArgument(

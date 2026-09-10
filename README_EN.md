@@ -1,4 +1,4 @@
-# Lidar_nav2_ws
+# FastLIO2_ROS2_ErrorAttribution
 
 A ROS 2-based 3D LiDAR autonomous navigation system
 
@@ -11,7 +11,7 @@ A ROS 2-based 3D LiDAR autonomous navigation system
   <img src="docs/KISS%20show_2.gif" alt="KISS demo 2" width="48%">
 </p>
 
-**Nav2_3D** is a ROS 2 Humble navigation workspace for four-wheel skid-steering robots. The system uses a Livox MID-360 3D LiDAR and IMU as its core sensors, integrating LiDAR-Inertial Odometry (LIO), 3D point-cloud relocalization, and the Nav2 navigation framework. It supports both **Gazebo simulation** and **real-robot deployment**, and the two modes can be switched by changing only the launch scripts.
+**FastLIO2_ROS2_ErrorAttribution** is a ROS 2 Humble navigation workspace for four-wheel skid-steering robots. The system uses a Livox MID-360 3D LiDAR and IMU as its core sensors, integrating LiDAR-Inertial Odometry (LIO), 3D point-cloud relocalization, and the Nav2 navigation framework. It supports both **Gazebo simulation** and **real-robot deployment**, and the two modes can be switched by changing only the launch scripts.
 
 Key features:
 
@@ -261,7 +261,7 @@ Common parameters:
 Current workspace defaults in the launch file:
 
 ```text
-prior_pcd_file: /home/pio/Nav2_3D_ws/src/me_nav2_bringup/pcd/nav_test_4_27.pcd
+prior_pcd_file: <install>/../me_nav2_bringup/pcd/nav_test_4_27.pcd  (auto-resolved)
 input_cloud_topic: /registered_scan
 map_frame: map
 odom_frame: odom

@@ -1,11 +1,11 @@
-# Lidar_nav2_ws Environment Setup
+# FastLIO2_ROS2_ErrorAttribution Environment Setup
 
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-22313F?logo=ros)](https://docs.ros.org/en/humble/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-E95420?logo=ubuntu)](https://releases.ubuntu.com/22.04/)
 [![Nav2](https://img.shields.io/badge/Nav2-Navigation2-4B8BBE)](https://navigation.ros.org/)
 [![LiDAR](https://img.shields.io/badge/LiDAR-Livox%20MID--360-00A6D6)](https://www.livoxtech.com/mid-360)
 
-`Lidar_nav2_ws` is a ROS 2 Humble-based 3D LiDAR autonomous navigation workspace that supports both Gazebo simulation and Livox MID-360 real-robot deployment. This document only covers the environment setup process for this project and assumes that ROS 2 Humble has already been installed.
+`FastLIO2_ROS2_ErrorAttribution` is a ROS 2 Humble-based 3D LiDAR autonomous navigation workspace that supports both Gazebo simulation and Livox MID-360 real-robot deployment. This document only covers the environment setup process for this project and assumes that ROS 2 Humble has already been installed.
 
 ## Table of Contents
 
@@ -76,20 +76,20 @@ Clone the workspace:
 
 ```bash
 cd ~
-git clone https://github.com/Ikunio/Lidar_nav2_ws.git
-cd Lidar_nav2_ws
+git clone https://github.com/db2412-cy6er/FastLIO2_ROS2_ErrorAttribution.git
+cd FastLIO2_ROS2_ErrorAttribution
 ```
 
 If the workspace already exists, enter it directly:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 ```
 
 Expected directory structure:
 
 ```text
-Lidar_nav2_ws/
+FastLIO2_ROS2_ErrorAttribution/
 ├── src/
 └── scripts/
     ├── build.sh
@@ -108,7 +108,7 @@ Lidar_nav2_ws/
 Prefer using `rosdep` to install dependencies according to `package.xml`:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
 ```
@@ -116,7 +116,7 @@ rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
 You can also use `rosdepc`:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 rosdepc install --from-paths src --ignore-src --rosdistro humble -r -y
 ```
@@ -172,7 +172,7 @@ Use rosdep for Eigen, TBB, FLANN, OpenMP, PCL, and other base dependencies. To m
 build the relocalization package sequentially:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 colcon build \
   --executor sequential \
@@ -186,7 +186,7 @@ CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 colcon build \
 Build the workspace:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 cd scripts
 ./build.sh
@@ -201,13 +201,13 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 After the build completes, source the workspace:
 
 ```bash
-source ~/Lidar_nav2_ws/install/setup.bash
+source ~/FastLIO2_ROS2_ErrorAttribution/install/setup.bash
 ```
 
 Optional: Add it to `~/.bashrc` so new terminals source the workspace automatically:
 
 ```bash
-echo "source ~/Lidar_nav2_ws/install/setup.bash" >> ~/.bashrc
+echo "source ~/FastLIO2_ROS2_ErrorAttribution/install/setup.bash" >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -239,7 +239,7 @@ ros2 run tf2_tools view_frames
 Start simulation mapping:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source install/setup.bash
 cd scripts
 ./mapping_sim.sh
@@ -274,7 +274,7 @@ Map output locations:
 Before navigation, check the map paths:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 vim src/me_nav2_bringup/launch/my_nav2_launch.py
 vim src/registration/global_relocalization_kiss_matcher/launch/global_kiss_matcher_relocalization_launch.py
 ```
@@ -288,7 +288,7 @@ Confirm the following:
 Start simulation navigation:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source install/setup.bash
 cd scripts
 ./nav2_sim.sh
@@ -310,19 +310,19 @@ Before real-robot mapping or navigation, confirm:
 - MID-360 network connectivity: `ping <MID360_IP>`.
 - `src/livox_ros_driver2/config/MID360_config.json` is configured correctly.
 - Robot power, LiDAR, IMU, chassis controller, emergency stop, and manual takeover are working correctly.
-- The workspace has been sourced: `source ~/Lidar_nav2_ws/install/setup.bash`.
+- The workspace has been sourced: `source ~/FastLIO2_ROS2_ErrorAttribution/install/setup.bash`.
 
 Real-robot mapping:
 
 ```bash
-cd ~/Lidar_nav2_ws/scripts
+cd ~/FastLIO2_ROS2_ErrorAttribution/scripts
 ./mapping_real.sh
 ```
 
 Real-robot navigation:
 
 ```bash
-cd ~/Lidar_nav2_ws/scripts
+cd ~/FastLIO2_ROS2_ErrorAttribution/scripts
 ./nav2_real.sh
 ```
 
@@ -359,7 +359,7 @@ Package 'xxx' not found
 Solution:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 pkg list | grep xxx
@@ -368,7 +368,7 @@ ros2 pkg list | grep xxx
 If it still cannot be found:
 
 ```bash
-cd ~/Lidar_nav2_ws/scripts
+cd ~/FastLIO2_ROS2_ErrorAttribution/scripts
 ./build.sh
 source ../install/setup.bash
 ```
@@ -383,7 +383,7 @@ KISS-Matcher core and small_gicp are pinned in the source tree, so no network do
 Verify rosdep dependencies, then clean and rebuild only this package sequentially:
 
 ```bash
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 rosdep check --from-paths src --ignore-src --rosdistro humble
 rm -rf build/global_relocalization_kiss_matcher install/global_relocalization_kiss_matcher
@@ -397,7 +397,7 @@ cmake --build build -j$(nproc)
 sudo cmake --install build
 sudo ldconfig
 
-cd ~/Lidar_nav2_ws/scripts
+cd ~/FastLIO2_ROS2_ErrorAttribution/scripts
 ./build.sh
 ```
 
@@ -443,7 +443,7 @@ Common causes:
 
 ```bash
 # Build
-cd ~/Lidar_nav2_ws
+cd ~/FastLIO2_ROS2_ErrorAttribution
 source /opt/ros/humble/setup.bash
 cd scripts
 ./build.sh
