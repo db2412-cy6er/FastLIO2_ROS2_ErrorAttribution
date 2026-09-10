@@ -31,3 +31,8 @@ frames_*.pdf
 .claude/
 .codex
 CLAUDE.md
+
+# 系统 / 编辑器元数据垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
