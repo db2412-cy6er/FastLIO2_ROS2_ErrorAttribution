@@ -31,4 +31,3 @@ frames_*.pdf
 .claude/
 .codex
 CLAUDE.md
-src/get_urdf/models/
