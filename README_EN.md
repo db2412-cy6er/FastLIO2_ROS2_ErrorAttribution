@@ -1,3 +1,8 @@
+> **Note**: This file is the **inherited upstream English documentation**, describing the navigation base
+> (FAST-LIO2 / Point-LIO odometry, SLAM Toolbox, KISS-Matcher relocalization, Nav2).
+> For this fork's own documentation — the P0–P5 degeneracy-detection / error-attribution research,
+> the metric dictionary and the final conclusions — see **[README.md](./README.md)**.
+
 # FastLIO2_ROS2_ErrorAttribution
 
 A ROS 2-based 3D LiDAR autonomous navigation system
